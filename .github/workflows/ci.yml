@@ -1,0 +1,47 @@
+name: checks
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      docker_smoke:
+        description: Run the real Docker/Harness integration test
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: pip install uv==0.10.2
+      - run: uv sync --frozen
+      - run: uv run ruff check launcher tests scripts
+      - run: uv run pytest -q
+      - run: npm --prefix web ci
+      - run: npm --prefix web run format:check
+      - run: npm --prefix web run build
+      - run: cd web && npx playwright install --with-deps chromium
+      - run: npm --prefix web test
+      - if: github.event_name == 'workflow_dispatch' && inputs.docker_smoke
+        run: |
+          docker pull runzhliu/deepseek-harness:0.2.1-rc.2-r1
+          docker pull python:3.12-slim
+          uv run python scripts/smoke.py
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: browser-test-artifacts
+          path: web/test-results

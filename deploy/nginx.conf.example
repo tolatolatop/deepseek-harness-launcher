@@ -1,0 +1,30 @@
+# Mount this location under an existing HTTPS server block.
+# Keep the PUBLIC_BASE path intact; Launcher strips the per-workspace prefix.
+# Put `map` in nginx's http block, outside server.
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+# Example inside your existing server:
+# LAUNCHER_PUBLIC_URL=https://existing.example/company-ai/launcher
+server {
+    listen 443 ssl;
+    server_name existing.example;
+    ssl_certificate     /path/to/company-certificate.pem;
+    ssl_certificate_key /path/to/company-private-key.pem;
+
+    location /company-ai/launcher {
+        proxy_pass http://127.0.0.1:18080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $http_host;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+        proxy_read_timeout 3600s;
+        client_max_body_size 33m;
+        # Query strings can contain application data; access logging is optional.
+        access_log off;
+    }
+}
