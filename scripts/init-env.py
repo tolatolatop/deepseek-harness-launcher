@@ -16,19 +16,21 @@ if path.exists():
     raise SystemExit(".env already exists; it has not been changed.")
 root = Path("data").resolve()
 root.mkdir(exist_ok=True)
+postgres_password = secrets.token_urlsafe(24)
 content = f"""LAUNCHER_SECRET_KEY={base64.urlsafe_b64encode(os.urandom(32)).decode()}
 LAUNCHER_BOOTSTRAP_USERNAME=admin
 LAUNCHER_BOOTSTRAP_PASSWORD={secrets.token_urlsafe(20)}
 LAUNCHER_PUBLIC_URL={args.public_url or f"http://localhost:{args.port}/launcher"}
 LAUNCHER_DATA_ROOT={root}
-LAUNCHER_DATABASE_URL=sqlite:///{root}/launcher.db
+LAUNCHER_DATABASE_URL=postgresql+psycopg://launcher:{postgres_password}@127.0.0.1:55432/launcher
 LAUNCHER_RUNTIME_IMAGE=runzhliu/deepseek-harness:0.2.1-rc.2-r1@sha256:ca8dd52ed949e3cbecc91a0c441ea627336ff23c68a640ca28db6e67a4337f73
 LAUNCHER_DOCKER_PREFIX=dsh-launcher
 LAUNCHER_CONTROL_CONTAINERS=
 LAUNCHER_MAX_RUNNING=8
 LAUNCHER_MIN_FREE_DISK_MB=1024
 PORT={args.port}
-POSTGRES_PASSWORD={secrets.token_urlsafe(24)}
+POSTGRES_PASSWORD={postgres_password}
+POSTGRES_PORT=55432
 MYSQL_PASSWORD={secrets.token_urlsafe(24)}
 MYSQL_ROOT_PASSWORD={secrets.token_urlsafe(24)}
 """

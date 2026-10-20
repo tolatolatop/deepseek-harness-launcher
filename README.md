@@ -31,9 +31,12 @@ uv sync --frozen
 npm --prefix web ci
 npm --prefix web run build
 docker compose --profile images pull runtime-image
+docker compose -f compose.yaml -f compose.dev.yaml up -d --wait postgres
 ```
 
 初始化会创建权限为 `0600` 的 `.env`，包含随机管理员密码和加密密钥；不会覆盖已有文件。初始用户名为 `admin`，密码查看本机 `.env` 的 `LAUNCHER_BOOTSTRAP_PASSWORD`。不要提交或分享此文件。
+
+本地 Python 进程通过 `127.0.0.1:55432` 访问 PostgreSQL；`compose.dev.yaml` 仅为本地开发发布这个回环端口，默认部署不发布数据库端口。如修改 `POSTGRES_PORT`，同时修改 `LAUNCHER_DATABASE_URL` 的端口。已有 `.env` 不会被覆盖，原有数据库选择仍按其中的配置生效。SQLite 可通过显式连接串用于临时开发和测试。
 
 终端一：
 
@@ -48,7 +51,7 @@ uv run uvicorn launcher.app:create_app --factory \
 uv run python -m launcher.worker
 ```
 
-打开 `http://localhost:18080/launcher/`。本地默认使用 SQLite；部署支持 PostgreSQL 和 MySQL 8.4。Worker 独立运行，API 不调用 Docker。
+打开 `http://localhost:18080/launcher/`。本地和 Compose 部署均默认使用 PostgreSQL；MySQL 8.4 兼容能力保留，需显式选择配置启用。Worker 独立运行，API 不调用 Docker。
 
 本地模式使用回环地址上的临时 Docker 映射端口，兼容 Docker Desktop 的网络边界。浏览器仍只访问 Launcher 入口。不要直接把实例端口暴露到局域网。
 
@@ -88,7 +91,7 @@ API 以 UID/GID 1000 运行。数据根目录应可由该用户读写；现有�
 
 Compose 中初始管理员密码只在数据库没有管理员时使用；修改 `.env` 不会重置已有密码。
 
-### MySQL 部署
+### MySQL 部署（可选，默认不启用）
 
 MySQL 使用独立的 `compose.mysql.yaml`，与默认 PostgreSQL 配置二选一，不需要叠加两个文件：
 
@@ -121,7 +124,8 @@ LAUNCHER_DATABASE_URL=mysql+pymysql://launcher:URL_ENCODED_PASSWORD@mysql-host:3
 | `LAUNCHER_PUBLIC_URL` | 浏览器看到的完整入口，可带路径前缀 |
 | `LAUNCHER_DATA_ROOT` | 持久化数据绝对路径 |
 | `LAUNCHER_SECRET_KEY` | Fernet 密钥，需与数据库一起备份 |
-| `LAUNCHER_DATABASE_URL` | 直接运行支持 SQLite、PostgreSQL、MySQL；Compose 按选用的 YAML 覆盖 |
+| `LAUNCHER_DATABASE_URL` | 默认 PostgreSQL；兼容 SQLite、MySQL，Compose 按显式选用的 YAML 覆盖 |
+| `POSTGRES_PORT` | 本地开发的 PostgreSQL 回环端口，默认 55432，仅 `compose.dev.yaml` 使用 |
 | `LAUNCHER_RUNTIME_IMAGE` | 固定版本及摘要的底座镜像 |
 | `LAUNCHER_MAX_RUNNING` | 同时运行名额，默认 8；包含启动中的空间 |
 | `LAUNCHER_RUNTIME_SUBNET_POOL` | 运行空间网络池，默认 `10.203.0.0/16`，每空间 `/28` |

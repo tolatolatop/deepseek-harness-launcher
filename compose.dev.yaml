@@ -1,0 +1,6 @@
+# Publish PostgreSQL only to localhost for a host-run API and Worker.
+# docker compose -f compose.yaml -f compose.dev.yaml up -d postgres
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-55432}:5432"

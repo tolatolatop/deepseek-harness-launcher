@@ -9,7 +9,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="LAUNCHER_", env_file=".env", extra="ignore")
-    database_url: str = "sqlite:///./data/launcher.db"
+    database_url: str = "postgresql+psycopg://launcher@127.0.0.1:55432/launcher"
     public_url: str = "http://localhost:8080/launcher"
     data_root: Path = Path("/tmp/dsh-launcher")
     secret_key: str = ""
