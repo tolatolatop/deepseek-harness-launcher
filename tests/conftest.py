@@ -1,14 +1,41 @@
+import os
+import uuid
+
 import pytest
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import make_url
 
 from launcher import db
 from launcher.settings import settings
 
 
 @pytest.fixture
-def client(tmp_path, monkeypatch):
-    monkeypatch.setenv("LAUNCHER_DATABASE_URL", f"sqlite:///{tmp_path}/test.db")
+def database_url(tmp_path):
+    server_url = os.environ.get("LAUNCHER_TEST_MYSQL_URL")
+    if not server_url:
+        yield f"sqlite:///{tmp_path}/test.db"
+        return
+    url = make_url(server_url)
+    if url.drivername != "mysql+pymysql":
+        raise ValueError("LAUNCHER_TEST_MYSQL_URL must use mysql+pymysql")
+    # Never clear a supplied database. Create and drop only our own random schema.
+    name = "launcher_test_" + uuid.uuid4().hex
+    admin = create_engine(url.set(database=None), isolation_level="AUTOCOMMIT")
+    try:
+        with admin.connect() as connection:
+            connection.execute(text(f"CREATE DATABASE `{name}` CHARACTER SET utf8mb4 COLLATE utf8mb4_bin"))
+        yield url.set(database=name).render_as_string(hide_password=False)
+    finally:
+        with admin.connect() as connection:
+            connection.execute(text(f"DROP DATABASE IF EXISTS `{name}`"))
+        admin.dispose()
+
+
+@pytest.fixture
+def client(tmp_path, monkeypatch, database_url):
+    monkeypatch.setenv("LAUNCHER_DATABASE_URL", database_url)
     monkeypatch.setenv("LAUNCHER_DATA_ROOT", str(tmp_path / "data"))
     monkeypatch.setenv("LAUNCHER_SECRET_KEY", Fernet.generate_key().decode())
     monkeypatch.setenv("LAUNCHER_BOOTSTRAP_PASSWORD", "a-test-password-very-long")

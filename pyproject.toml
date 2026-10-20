@@ -16,6 +16,7 @@ dependencies = [
   "websockets>=15,<16",
   "python-multipart>=0.0.20",
   "pyyaml>=6,<7",
+  "pymysql[rsa]>=1.1,<2",
 ]
 
 [dependency-groups]

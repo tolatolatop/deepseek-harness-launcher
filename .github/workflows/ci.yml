@@ -13,6 +13,18 @@ permissions:
   contents: read
 
 jobs:
+  mysql:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install uv==0.10.2
+      - run: uv sync --frozen
+      - run: docker pull mysql:8.4
+      - run: uv run python scripts/test-mysql.py
   checks:
     runs-on: ubuntu-latest
     timeout-minutes: 20

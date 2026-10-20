@@ -1,0 +1,79 @@
+# Standalone alternative: docker compose -f compose.mysql.yaml up -d --build
+name: deepseek-launcher
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: launcher
+      MYSQL_USER: launcher
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in .env}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_bin"]
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=$$MYSQL_PASSWORD mysql --protocol=TCP -h 127.0.0.1 -u launcher -D launcher -e 'SELECT 1' >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    networks: [control]
+    restart: unless-stopped
+  api:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    image: deepseek-launcher:local
+    container_name: dsh-launcher-api
+    user: "1000:1000"
+    env_file: .env
+    environment:
+      LAUNCHER_DATABASE_URL: mysql+pymysql://launcher:${MYSQL_PASSWORD}@mysql:3306/launcher?charset=utf8mb4
+      LAUNCHER_CONTROL_CONTAINERS: dsh-launcher-api,dsh-launcher-worker
+    volumes:
+      - ${LAUNCHER_DATA_ROOT:?Set an absolute data path}:${LAUNCHER_DATA_ROOT}
+    ports:
+      - "127.0.0.1:${PORT:-18080}:8000"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,urllib.request,urllib.parse; p=urllib.parse.urlsplit(os.environ['LAUNCHER_PUBLIC_URL']).path.rstrip('/'); urllib.request.urlopen('http://localhost:8000'+p+'/api/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [control, egress]
+    restart: unless-stopped
+  worker:
+    image: deepseek-launcher:local
+    container_name: dsh-launcher-worker
+    command: ["python", "-m", "launcher.worker"]
+    env_file: .env
+    environment:
+      LAUNCHER_DATABASE_URL: mysql+pymysql://launcher:${MYSQL_PASSWORD}@mysql:3306/launcher?charset=utf8mb4
+      LAUNCHER_CONTROL_CONTAINERS: dsh-launcher-api,dsh-launcher-worker
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${LAUNCHER_DATA_ROOT}:${LAUNCHER_DATA_ROOT}
+    depends_on:
+      api:
+        condition: service_healthy
+    networks: [control, egress]
+    restart: unless-stopped
+  runtime-image:
+    image: ${LAUNCHER_RUNTIME_IMAGE:-runzhliu/deepseek-harness:0.2.1-rc.2-r1}
+    profiles: [images]
+    entrypoint: ["true"]
+    network_mode: none
+networks:
+  control:
+    internal: true
+    ipam:
+      config:
+        - subnet: ${LAUNCHER_CONTROL_SUBNET:-10.204.0.0/28}
+  egress:
+    ipam:
+      config:
+        - subnet: ${LAUNCHER_EGRESS_SUBNET:-10.204.0.16/28}
+volumes:
+  mysql-data:

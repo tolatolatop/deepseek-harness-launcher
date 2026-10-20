@@ -48,7 +48,7 @@ uv run uvicorn launcher.app:create_app --factory \
 uv run python -m launcher.worker
 ```
 
-打开 `http://localhost:18080/launcher/`。本地使用 SQLite；部署使用 PostgreSQL。Worker 独立运行，API 不调用 Docker。
+打开 `http://localhost:18080/launcher/`。本地默认使用 SQLite；部署支持 PostgreSQL 和 MySQL 8.4。Worker 独立运行，API 不调用 Docker。
 
 本地模式使用回环地址上的临时 Docker 映射端口，兼容 Docker Desktop 的网络边界。浏览器仍只访问 Launcher 入口。不要直接把实例端口暴露到局域网。
 
@@ -88,6 +88,32 @@ API 以 UID/GID 1000 运行。数据根目录应可由该用户读写；现有�
 
 Compose 中初始管理员密码只在数据库没有管理员时使用；修改 `.env` 不会重置已有密码。
 
+### MySQL 部署
+
+MySQL 使用独立的 `compose.mysql.yaml`，与默认 PostgreSQL 配置二选一，不需要叠加两个文件：
+
+```bash
+# 新部署生成 .env；已有文件时跳过此步骤。
+python scripts/init-env.py --port 18080
+docker compose -f compose.mysql.yaml --profile images pull runtime-image
+docker compose -f compose.mysql.yaml up -d --build
+docker compose -f compose.mysql.yaml ps
+```
+
+初始化脚本会生成 `MYSQL_PASSWORD` 和 `MYSQL_ROOT_PASSWORD`。旧版 `.env` 需补充这两个不同的随机密码；建议使用只含字母、数字、`-`、`_` 的密码，避免连接串转义问题。数据库为 `launcher`，应用使用普通用户 `launcher`，MySQL 数据保存在独立的 `mysql-data` 卷，不向宿主发布端口。备份时使用 MySQL 的备份工具，并同时备份空间文件和加密密钥。
+
+如果直接运行 Python API/Worker 并接入已有 MySQL，在 `.env` 设置：
+
+```dotenv
+LAUNCHER_DATABASE_URL=mysql+pymysql://launcher:URL_ENCODED_PASSWORD@mysql-host:3306/launcher?charset=utf8mb4
+```
+
+已有 MySQL 需预先创建数据库和账号，允许应用连接及在该数据库中建表、创建索引和读写数据。URL 中的密码如包含 `@`、`:`、`/`、`%` 等字符，需要百分号编码。API 与 Worker 必须使用同一连接串；Compose 内的地址由相应 YAML 配置，修改 `.env` 的 `LAUNCHER_DATABASE_URL` 只影响直接运行模式。
+
+表使用 InnoDB、`utf8mb4` 和区分大小写的排序规则，保持账号名称匹配语义一致；时间字段使用双精度，保留会话、心跳及租约精度。连接池采用存活检查和回收，事务采用 `READ COMMITTED`，确保等待资源分配锁后读到最新名额。实现参考 [SQLAlchemy MySQL 文档](https://docs.sqlalchemy.org/en/20/dialects/mysql.html)。
+
+**已有安装切换数据库不会自动迁移数据。** 两份 Compose 使用同一应用容器名和入口，不能同时启动。切换前停止实例及原部署并备份，迁移数据库记录时保留 ID、空间目录和 `LAUNCHER_SECRET_KEY`；否则新数据库会表现为全新安装。此改动不会修改现有 SQLite/PostgreSQL 表，现有部署可继续使用原配置。
+
 ### 主要配置
 
 | 配置 | 默认值 / 用途 |
@@ -95,7 +121,7 @@ Compose 中初始管理员密码只在数据库没有管理员时使用；修改
 | `LAUNCHER_PUBLIC_URL` | 浏览器看到的完整入口，可带路径前缀 |
 | `LAUNCHER_DATA_ROOT` | 持久化数据绝对路径 |
 | `LAUNCHER_SECRET_KEY` | Fernet 密钥，需与数据库一起备份 |
-| `LAUNCHER_DATABASE_URL` | 本地 SQLite；Compose 自动覆盖为 PostgreSQL |
+| `LAUNCHER_DATABASE_URL` | 直接运行支持 SQLite、PostgreSQL、MySQL；Compose 按选用的 YAML 覆盖 |
 | `LAUNCHER_RUNTIME_IMAGE` | 固定版本及摘要的底座镜像 |
 | `LAUNCHER_MAX_RUNNING` | 同时运行名额，默认 8；包含启动中的空间 |
 | `LAUNCHER_RUNTIME_SUBNET_POOL` | 运行空间网络池，默认 `10.203.0.0/16`，每空间 `/28` |
@@ -108,7 +134,7 @@ Compose 中初始管理员密码只在数据库没有管理员时使用；修改
 
 ## 测试
 
-首版已验证：22 项后端测试、管理员到成员的浏览器操作流程、真实 Harness 容器与原生浏览器界面，以及 Docker Compose + PostgreSQL 下的启动、停止和文件持久化。
+后端测试覆盖登录、权限、配置、文件、代理、生命周期及并发资源分配；同一套测试可在 SQLite 和真实 MySQL 上执行。首版还验证了管理员到成员的浏览器操作流程、真实 Harness 容器与原生浏览器界面，以及 Docker Compose + PostgreSQL 下的启动、停止和文件持久化。
 
 ```bash
 uv run pytest -q
@@ -118,6 +144,15 @@ cd web && npx playwright install chromium && npm test
 ```
 
 浏览器测试使用独立临时数据库与端口 `18180`，验证登录、管理设置、创建成员、个人配置、文件传输、异步操作与移动端布局。测试没有 Docker Worker，不会创建真实实例。
+
+真实 MySQL 数据库测试（无需更改 `.env`）：
+
+```bash
+docker pull mysql:8.4
+uv run python scripts/test-mysql.py
+```
+
+脚本创建临时 MySQL 容器及随机测试库，完整运行后端测试，然后清理容器与数据卷。CI 在独立 MySQL 任务中运行同一脚本。也可设置 `LAUNCHER_TEST_MYSQL_URL` 后直接运行 `uv run pytest -q`；该测试账号必须具有创建和删除数据库的权限，测试只删除自身生成的 `launcher_test_<随机ID>` 库。
 
 真实 Docker 测试：
 

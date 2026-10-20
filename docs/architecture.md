@@ -25,6 +25,10 @@ The database is the source of desired state. Docker is the source of observed ru
 
 One host and one worker are intentional MVP constraints. The file lock is shared in the data root. PostgreSQL admission transactions plus the operation uniqueness constraint provide API-side concurrency safety. Docker names, workspace IDs and labels permit idempotent recovery.
 
+MySQL 8.4 is also supported through PyMySQL. Tables use InnoDB, explicit VARCHAR lengths, TEXT for credentials/instructions, utf8mb4 binary collation, and DOUBLE for epoch timestamps. The connection uses READ COMMITTED: a request may have read its session and workspace before waiting on the admission lock, so MySQL's default repeatable-read snapshot would otherwise hide newly reserved capacity. Pre-ping and connection recycling handle stale pooled connections. Both databases retain the unique active-operation constraint.
+
+`compose.yaml` deploys PostgreSQL; `compose.mysql.yaml` independently deploys MySQL. Direct Python processes use `LAUNCHER_DATABASE_URL`. Changing the selected database does not migrate existing accounts, sessions, workspace metadata or operation history.
+
 ## Routing and identity
 
 `PUBLIC_URL` can be an IP or existing domain with an arbitrary path prefix:

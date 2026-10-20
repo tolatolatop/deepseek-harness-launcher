@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from sqlalchemy import event
+from sqlalchemy.engine import make_url
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from launcher.models import Platform, User
@@ -23,7 +24,15 @@ def engine():
                 connection.execute("PRAGMA foreign_keys=ON")
                 connection.execute("PRAGMA journal_mode=WAL")
         else:
-            _engine = create_engine(url, pool_pre_ping=True)
+            parsed = make_url(url)
+            options = {"pool_pre_ping": True}
+            if parsed.get_backend_name() == "mysql":
+                if parsed.drivername == "mysql":
+                    parsed = parsed.set(drivername="mysql+pymysql")
+                parsed = parsed.update_query_dict({"charset": "utf8mb4"})
+                # Admission queries must see commits made while waiting for the platform lock.
+                options.update(isolation_level="READ COMMITTED", pool_recycle=1800)
+            _engine = create_engine(parsed, **options)
     return _engine
 
 

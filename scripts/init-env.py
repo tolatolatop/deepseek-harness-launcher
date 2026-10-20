@@ -29,6 +29,8 @@ LAUNCHER_MAX_RUNNING=8
 LAUNCHER_MIN_FREE_DISK_MB=1024
 PORT={args.port}
 POSTGRES_PASSWORD={secrets.token_urlsafe(24)}
+MYSQL_PASSWORD={secrets.token_urlsafe(24)}
+MYSQL_ROOT_PASSWORD={secrets.token_urlsafe(24)}
 """
 fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
 with os.fdopen(fd, "w") as f:
