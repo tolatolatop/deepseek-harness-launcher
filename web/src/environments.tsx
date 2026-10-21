@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { Box, Check, Plus } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { ArrowLeft, Box, Check, ChevronDown, Plus } from "lucide-react";
 
 type Request = (path: string, method?: string, body?: unknown) => Promise<any>;
 type Notify = (message: string, error?: boolean) => void;
@@ -59,6 +59,35 @@ export function TemplateManager({
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
+  const editorRef = useRef<HTMLFormElement>(null);
+  const createButtonRef = useRef<HTMLButtonElement>(null);
+  const wasOpen = useRef(false);
+  const [formError, setFormError] = useState("");
+  const errorRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (open) {
+      editorRef.current?.scrollIntoView({ block: "start" });
+      editorRef.current
+        ?.querySelector<HTMLInputElement>("input")
+        ?.focus({ preventScroll: true });
+    } else if (wasOpen.current) {
+      createButtonRef.current?.focus({ preventScroll: true });
+      createButtonRef.current?.scrollIntoView({ block: "nearest" });
+    }
+    wasOpen.current = open;
+  }, [open]);
+  useEffect(() => {
+    if (formError) {
+      errorRef.current?.focus({ preventScroll: true });
+      errorRef.current?.scrollIntoView({ block: "nearest" });
+    }
+  }, [formError]);
+  function openEditor(template: EnvironmentTemplate | null, edit = false) {
+    setDraft(template);
+    setEditing(edit);
+    setFormError("");
+    setOpen(true);
+  }
   async function perform(task: () => Promise<unknown>, message: string) {
     setBusy(true);
     try {
@@ -73,129 +102,122 @@ export function TemplateManager({
   }
   return (
     <>
-      <section className="panel">
-        <div className="panel-heading">
-          <div>
-            <h3>运行环境模板</h3>
-            <small>每个已发布版本保持不可变，空间保存独立快照。</small>
+      {!open && (
+        <section className="panel">
+          <div className="panel-heading">
+            <div>
+              <h3>运行环境模板</h3>
+              <small>每个已发布版本保持不可变，空间保存独立快照。</small>
+            </div>
+            <button
+              className="button primary small"
+              ref={createButtonRef}
+              onClick={() => openEditor(null)}
+            >
+              <Plus size={15} />
+              新建模板
+            </button>
           </div>
-          <button
-            className="button primary small"
-            onClick={() => {
-              setDraft(null);
-              setEditing(false);
-              setOpen(!open);
-            }}
-          >
-            <Plus size={15} />
-            新建模板
-          </button>
-        </div>
-        <div className="template-grid">
-          {templates.map((template) => (
-            <article className="template-card" key={template.id}>
-              <div className="template-card-heading">
-                <Box size={19} />
-                <h3>{template.name}</h3>
-                <span className="pill">{template.version}</span>
-              </div>
-              <p>{template.description || "标准持久化项目与会话目录"}</p>
-              <code className="image-reference">{template.image}</code>
-              <small>
-                {template.spec.cpu} vCPU · {template.spec.memory_mb / 1024} GB ·{" "}
-                {template.spec.compatibility_group}
-              </small>
-              <div className="template-card-actions">
-                <span
-                  className={`pill ${template.published && template.enabled ? "good" : ""}`}
-                >
-                  {!template.enabled
-                    ? "已停用"
-                    : template.published
-                      ? "已发布"
-                      : "草稿"}
-                </span>
-                {!template.published && (
-                  <button
-                    className="text-link"
-                    disabled={busy}
-                    onClick={() => {
-                      setDraft(template);
-                      setEditing(true);
-                      setOpen(true);
-                    }}
+          <div className="template-grid">
+            {templates.map((template) => (
+              <article className="template-card" key={template.id}>
+                <div className="template-card-heading">
+                  <Box size={19} />
+                  <h3>{template.name}</h3>
+                  <span className="pill">{template.version}</span>
+                </div>
+                <p>{template.description || "标准持久化项目与会话目录"}</p>
+                <code className="image-reference">{template.image}</code>
+                <small>
+                  {template.spec.cpu} vCPU · {template.spec.memory_mb / 1024} GB
+                  · {template.spec.compatibility_group}
+                </small>
+                <div className="template-card-actions">
+                  <span
+                    className={`pill ${template.published && template.enabled ? "good" : ""}`}
                   >
-                    编辑草稿
-                  </button>
-                )}
-                {!template.published && (
-                  <button
-                    className="text-link"
-                    disabled={busy}
-                    onClick={() => {
-                      if (
-                        confirm(
-                          "发布前请确认镜像已经准备好，并且属于声明的数据兼容组。是否发布？",
+                    {!template.enabled
+                      ? "已停用"
+                      : template.published
+                        ? "已发布"
+                        : "草稿"}
+                  </span>
+                  {!template.published && (
+                    <button
+                      className="text-link"
+                      disabled={busy}
+                      onClick={() => openEditor(template, true)}
+                    >
+                      编辑草稿
+                    </button>
+                  )}
+                  {!template.published && (
+                    <button
+                      className="text-link"
+                      disabled={busy}
+                      onClick={() => {
+                        if (
+                          confirm(
+                            "发布前请确认镜像已经准备好，并且属于声明的数据兼容组。是否发布？",
+                          )
                         )
+                          perform(
+                            () =>
+                              request(
+                                `/admin/templates/${template.id}/publish`,
+                                "POST",
+                              ),
+                            "模板已发布",
+                          );
+                      }}
+                    >
+                      发布
+                    </button>
+                  )}
+                  <button
+                    className="text-link"
+                    disabled={busy}
+                    onClick={() =>
+                      perform(
+                        () =>
+                          request(`/admin/templates/${template.id}`, "PATCH", {
+                            enabled: !template.enabled,
+                          }),
+                        template.enabled
+                          ? "模板已停用，已有空间继续使用原快照"
+                          : "模板已启用",
                       )
-                        perform(
-                          () =>
-                            request(
-                              `/admin/templates/${template.id}/publish`,
-                              "POST",
-                            ),
-                          "模板已发布",
-                        );
-                    }}
+                    }
                   >
-                    发布
+                    {template.enabled ? "停用" : "启用"}
                   </button>
-                )}
-                <button
-                  className="text-link"
-                  disabled={busy}
-                  onClick={() =>
-                    perform(
-                      () =>
-                        request(`/admin/templates/${template.id}`, "PATCH", {
-                          enabled: !template.enabled,
-                        }),
-                      template.enabled
-                        ? "模板已停用，已有空间继续使用原快照"
-                        : "模板已启用",
-                    )
-                  }
-                >
-                  {template.enabled ? "停用" : "启用"}
-                </button>
-                <button
-                  className="text-link"
-                  disabled={busy}
-                  onClick={() => {
-                    setDraft(template);
-                    setEditing(false);
-                    setOpen(true);
-                  }}
-                >
-                  创建新版本
-                </button>
-              </div>
-            </article>
-          ))}
-        </div>
-      </section>
+                  <button
+                    className="text-link"
+                    disabled={busy}
+                    onClick={() => openEditor(template)}
+                  >
+                    创建新版本
+                  </button>
+                </div>
+              </article>
+            ))}
+          </div>
+        </section>
+      )}
       {open && (
         <form
-          className="panel settings-panel"
-          key={`${draft?.id || "new"}-${editing}`}
+          className="panel template-editor"
+          ref={editorRef}
+          aria-labelledby="template-editor-title"
           onSubmit={async (event) => {
             event.preventDefault();
+            setFormError("");
             const data = new FormData(event.currentTarget);
             let environment;
             try {
               environment = JSON.parse(String(data.get("environment") || "{}"));
             } catch {
-              notify("环境变量需要填写有效 JSON 对象", true);
+              setFormError("环境变量需要填写有效 JSON 对象");
               return;
             }
             setBusy(true);
@@ -230,162 +252,252 @@ export function TemplateManager({
               setOpen(false);
               notify("模板草稿已保存，确认后可发布");
             } catch (error) {
-              notify((error as Error).message, true);
+              setFormError((error as Error).message);
             } finally {
               setBusy(false);
             }
           }}
         >
-          <div className="section-intro">
-            <span className="section-icon">
-              <Box />
-            </span>
+          <header className="template-editor-heading">
             <div>
-              <h3>
+              <span className="template-editor-context">
+                <Box size={15} aria-hidden="true" />
+                运行环境模板 / 草稿
+              </span>
+              <h3 id="template-editor-title">
                 {editing
                   ? "编辑模板草稿"
                   : draft
                     ? "创建模板新版本"
                     : "新建模板"}
               </h3>
-              <p>镜像需预先准备到 Docker 主机，发布后通过新版本迭代。</p>
+              <p>
+                {draft && !editing
+                  ? `基于 ${draft.name} · ${draft.version} 创建，填写新的版本号后保存。`
+                  : "配置团队可选的运行环境，保存草稿后再发布。"}
+              </p>
             </div>
-          </div>
-          <div className="form-grid">
-            <label>
-              模板标识
-              <input
-                name="slug"
-                pattern="[a-z0-9][a-z0-9-]*"
-                maxLength={64}
-                defaultValue={draft?.slug}
-                required
-                placeholder="python-dev"
-              />
-            </label>
-            <label>
-              版本号
-              <input
-                name="version"
-                defaultValue={editing ? draft?.version : ""}
-                maxLength={32}
-                required
-                placeholder="1.0.0"
-              />
-            </label>
-            <label>
-              环境名称
-              <input
-                name="name"
-                maxLength={60}
-                defaultValue={draft?.name}
-                required
-                placeholder="Python 开发环境"
-              />
-            </label>
-            <label>
-              数据兼容组
-              <input
-                name="compatibility_group"
-                defaultValue={
-                  draft?.spec.compatibility_group || "deepseek-harness-0.2.1"
-                }
-                required
-              />
-              <small>只有兼容组相同的模板才能切换并复用现有会话。</small>
-            </label>
-          </div>
-          <label>
-            镜像地址与摘要
-            <input
-              name="image"
-              defaultValue={
-                draft?.image.includes("@sha256:") ? draft.image : ""
-              }
-              required
-              placeholder="registry.example/harness-python@sha256:…"
-            />
-          </label>
-          <label>
-            环境说明
-            <textarea
-              name="description"
-              rows={2}
-              maxLength={2000}
-              defaultValue={draft?.description}
-            />
-          </label>
-          <div className="form-grid">
-            <label>
-              默认 CPU
-              <input
-                name="cpu"
-                type="number"
-                step="0.5"
-                min="0.5"
-                max="16"
-                defaultValue={draft?.spec.cpu || 2}
-                required
-              />
-            </label>
-            <label>
-              默认内存（MB）
-              <input
-                name="memory_mb"
-                type="number"
-                min="512"
-                max="32768"
-                defaultValue={draft?.spec.memory_mb || 2048}
-                required
-              />
-            </label>
-            <label>
-              临时目录限额（MB）
-              <input
-                name="tmp_mb"
-                type="number"
-                min="64"
-                max="2048"
-                defaultValue={draft?.spec.tmp_mb || 512}
-                required
-              />
-            </label>
-          </div>
-          <small className="muted">
-            实际 CPU 和内存同时受成员配额限制。项目和 Harness home
-            固定持久化，停止和重建时保留。
-          </small>
-          <details>
-            <summary>环境与启动选项</summary>
-            <label>
-              公开环境变量（JSON）
-              <textarea
-                name="environment"
-                rows={3}
-                defaultValue={JSON.stringify(
-                  draft?.spec.environment || {},
-                  null,
-                  2,
-                )}
-              />
-              <small>
-                用于 LANG、TZ 等公开配置，勿填写凭据。启动器保留变量不能覆盖。
-              </small>
-            </label>
-            <label>
-              镜像内启动补丁
-              <textarea
-                name="startup_patches"
-                rows={2}
-                defaultValue={draft?.spec.startup_patches.join("\n")}
-                placeholder="每行一个 /opt 下的 YAML 文件路径"
-              />
-            </label>
+            <button
+              type="button"
+              className="button secondary small"
+              disabled={busy}
+              onClick={() => setOpen(false)}
+            >
+              <ArrowLeft size={15} aria-hidden="true" />
+              返回模板列表
+            </button>
+          </header>
+          <section
+            className="template-editor-section"
+            aria-labelledby="template-basics-title"
+          >
+            <div className="template-section-description">
+              <h4 id="template-basics-title">基本信息</h4>
+              <p>用名称识别环境，用版本区分每次发布。</p>
+            </div>
+            <div className="template-field-grid">
+              <label className="template-field-wide">
+                环境名称
+                <input
+                  name="name"
+                  maxLength={60}
+                  defaultValue={draft?.name}
+                  required
+                  placeholder="Python 开发环境"
+                />
+              </label>
+              <label>
+                模板标识
+                <input
+                  name="slug"
+                  pattern="[a-z0-9][a-z0-9-]*"
+                  maxLength={64}
+                  defaultValue={draft?.slug}
+                  required
+                  placeholder="python-dev"
+                />
+              </label>
+              <label>
+                版本号
+                <input
+                  name="version"
+                  defaultValue={editing ? draft?.version : ""}
+                  maxLength={32}
+                  required
+                  placeholder="1.0.0"
+                />
+              </label>
+              <label className="template-field-wide">
+                环境说明
+                <textarea
+                  name="description"
+                  rows={2}
+                  maxLength={2000}
+                  defaultValue={draft?.description}
+                />
+              </label>
+            </div>
+          </section>
+          <section
+            className="template-editor-section"
+            aria-labelledby="template-image-title"
+          >
+            <div className="template-section-description">
+              <h4 id="template-image-title">镜像与数据</h4>
+              <p>使用固定镜像摘要，确保每次启动使用相同环境。</p>
+            </div>
+            <div className="template-section-fields">
+              <label>
+                镜像地址与摘要
+                <input
+                  name="image"
+                  aria-label="镜像地址与摘要"
+                  aria-describedby="template-image-help"
+                  defaultValue={
+                    draft?.image.includes("@sha256:") ? draft.image : ""
+                  }
+                  required
+                  placeholder="registry.example/harness-python@sha256:…"
+                  className="template-code"
+                  spellCheck={false}
+                />
+                <small id="template-image-help">
+                  镜像需预先准备到 Docker 主机，地址必须包含 @sha256: 摘要。
+                </small>
+              </label>
+              <label>
+                数据兼容组
+                <input
+                  name="compatibility_group"
+                  defaultValue={
+                    draft?.spec.compatibility_group || "deepseek-harness-0.2.1"
+                  }
+                  required
+                />
+                <small>只有兼容组相同的模板才能切换并复用现有会话。</small>
+              </label>
+            </div>
+          </section>
+          <section
+            className="template-editor-section"
+            aria-labelledby="template-resources-title"
+          >
+            <div className="template-section-description">
+              <h4 id="template-resources-title">资源配置</h4>
+              <p>设置此环境的默认运行资源。</p>
+            </div>
+            <div className="template-section-fields">
+              <div className="template-resource-grid">
+                <label>
+                  默认 CPU
+                  <input
+                    name="cpu"
+                    type="number"
+                    step="0.5"
+                    min="0.5"
+                    max="16"
+                    defaultValue={draft?.spec.cpu || 2}
+                    required
+                  />
+                </label>
+                <label>
+                  默认内存（MB）
+                  <input
+                    name="memory_mb"
+                    type="number"
+                    min="512"
+                    max="32768"
+                    defaultValue={draft?.spec.memory_mb || 2048}
+                    required
+                  />
+                </label>
+                <label>
+                  临时目录限额（MB）
+                  <input
+                    name="tmp_mb"
+                    type="number"
+                    min="64"
+                    max="2048"
+                    defaultValue={draft?.spec.tmp_mb || 512}
+                    required
+                  />
+                </label>
+              </div>
+              <p className="template-field-help">
+                实际 CPU 和内存同时受成员配额限制。项目和 Harness home
+                固定持久化，停止和重建时保留。
+              </p>
+            </div>
+          </section>
+          <details className="template-advanced">
+            <summary>
+              <span>
+                环境与启动选项 <small>可选</small>
+              </span>
+              <ChevronDown size={16} aria-hidden="true" />
+            </summary>
+            <div className="template-field-grid">
+              <label>
+                公开环境变量（JSON）
+                <textarea
+                  name="environment"
+                  className="template-code"
+                  spellCheck={false}
+                  rows={5}
+                  defaultValue={JSON.stringify(
+                    draft?.spec.environment || {},
+                    null,
+                    2,
+                  )}
+                />
+                <small>
+                  用于 LANG、TZ 等公开配置，勿填写凭据。启动器保留变量不能覆盖。
+                </small>
+              </label>
+              <label>
+                镜像内启动补丁
+                <textarea
+                  name="startup_patches"
+                  className="template-code"
+                  spellCheck={false}
+                  rows={5}
+                  defaultValue={draft?.spec.startup_patches.join("\n")}
+                  placeholder="每行一个 /opt 下的 YAML 文件路径"
+                />
+              </label>
+            </div>
           </details>
-          <button className="button primary" disabled={busy}>
-            <Check size={16} />
-            保存模板草稿
-          </button>
+          <footer className="template-editor-footer">
+            <div>
+              <p className="template-field-help">
+                草稿保存后可继续编辑，发布后通过新版本迭代。
+              </p>
+              {formError && (
+                <div
+                  className="template-form-error"
+                  role="alert"
+                  tabIndex={-1}
+                  ref={errorRef}
+                >
+                  {formError}
+                </div>
+              )}
+            </div>
+            <div className="template-editor-actions">
+              <button
+                type="button"
+                className="button secondary"
+                disabled={busy}
+                onClick={() => setOpen(false)}
+              >
+                取消
+              </button>
+              <button type="submit" className="button primary" disabled={busy}>
+                <Check size={16} aria-hidden="true" />
+                {busy ? "保存中…" : "保存模板草稿"}
+              </button>
+            </div>
+          </footer>
         </form>
       )}
     </>
