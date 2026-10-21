@@ -51,11 +51,14 @@ def public_user(user: User):
     return user.model_dump(exclude={"password_hash"})
 
 
-def public_workspace(ws: Workspace):
+def public_workspace(ws: Workspace, db: Session):
     _ = ws.id
     result = ws.model_dump(exclude={"token_encrypted", "runtime_cookie", "runtime_address"})
     result["has_api_token"] = bool(ws.token_encrypted)
     result["entry_url"] = f"{settings().base_path}/w/{ws.id}/"
+    from launcher.templates import runtime_summary
+
+    result["runtime"] = runtime_summary(db, ws)
     return result
 
 

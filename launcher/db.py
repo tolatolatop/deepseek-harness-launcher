@@ -43,6 +43,10 @@ def init_db():
     with Session(engine()) as db:
         if not db.get(Platform, 1):
             db.add(Platform())
+            db.flush()
+        from launcher.templates import seed_templates
+
+        seed_templates(db, db.get(Platform, 1).template_name)
         if not db.exec(select(User).where(User.role == "admin")).first():
             cfg = settings()
             if len(cfg.bootstrap_password) < 12:

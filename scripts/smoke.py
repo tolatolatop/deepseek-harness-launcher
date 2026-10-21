@@ -9,6 +9,7 @@ import json
 import os
 import secrets
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -102,8 +103,18 @@ def main():
                 files={"file": ("persist.txt", b"persistent workspace content")},
             ).raise_for_status()
 
-            def operation(action):
-                response = http.post(f"/launcher/api/workspaces/{wid}/actions/{action}")
+            def operation(action, template_id=None):
+                if template_id:
+                    current = http.get("/launcher/api/workspace").json()
+                    response = http.post(
+                        f"/launcher/api/admin/workspaces/{wid}/upgrade",
+                        json={
+                            "template_id": template_id,
+                            "expected_version": current["config_version"],
+                        },
+                    )
+                else:
+                    response = http.post(f"/launcher/api/workspaces/{wid}/actions/{action}")
                 response.raise_for_status()
                 operation_id = response.json()["id"]
                 deadline = time.monotonic() + 160
@@ -240,6 +251,65 @@ def main():
             sentinel = home / "persistence-smoke.txt"
             sentinel.write_text("persist home")
             before_id = container.id
+            # Restart both control processes and remove cached connection data. The
+            # worker must reattach/authenticate without replacing the runtime.
+            for index in (0, 1):
+                previous = processes[index]
+                previous.terminate()
+                previous.wait(timeout=15)
+                processes[index] = subprocess.Popen(previous.args, cwd=ROOT, env=env, stdout=log, stderr=log)
+                if index == 0:
+                    for _ in range(80):
+                        try:
+                            if http.get("/launcher/api/health").is_success:
+                                break
+                        except httpx.HTTPError:
+                            pass
+                        time.sleep(0.2)
+            with sqlite3.connect(data / "test.db") as connection:
+                connection.execute(
+                    "UPDATE workspace SET runtime_address='', runtime_cookie='', status='recovering' WHERE id=?",
+                    (wid,),
+                )
+            recovery_deadline = time.monotonic() + 40
+            while time.monotonic() < recovery_deadline:
+                current = http.get("/launcher/api/workspace").json()
+                if current["status"] == "running" and http.get(f"/launcher/w/{wid}/").status_code == 200:
+                    break
+                time.sleep(1)
+            else:
+                raise RuntimeError("Worker failed to recover existing runtime")
+            assert client.containers.get(f"{prefix}-{wid}").id == before_id
+            print(
+                "PASS: API/Worker restart and lost-session recovery preserve the running container",
+                flush=True,
+            )
+            template = http.post(
+                "/launcher/api/admin/templates",
+                json={
+                    "slug": "smoke-runtime",
+                    "name": "Smoke custom environment",
+                    "version": "2.0.0",
+                    "image": client.images.get(repo_image).attrs["RepoDigests"][0],
+                    "spec": {"cpu": 1, "memory_mb": 1024, "environment": {"WORKSPACE_PROFILE": "smoke"}},
+                },
+            )
+            template.raise_for_status()
+            template_id = template.json()["id"]
+            http.post(f"/launcher/api/admin/templates/{template_id}/publish").raise_for_status()
+            operation("upgrade", template_id)
+            upgraded = client.containers.get(f"{prefix}-{wid}")
+            assert upgraded.id != before_id
+            assert upgraded.attrs["HostConfig"]["NanoCpus"] == 10**9
+            assert "WORKSPACE_PROFILE=smoke" in upgraded.attrs["Config"]["Env"]
+            current = http.get("/launcher/api/workspace").json()
+            assert current["runtime"]["applied_template"]["id"] == template_id
+            assert current["runtime"]["actual_image_id"] == upgraded.attrs["Image"]
+            assert sentinel.read_text() == "persist home"
+            print(
+                "PASS: published template controls real image, resources, environment and persistent upgrade",
+                flush=True,
+            )
             operation("stop")
             assert http.get(f"/launcher/w/{wid}/").status_code == 409
             operation("start")
@@ -255,7 +325,23 @@ def main():
                 == b"executed in container"
             )
             print("PASS: project and Harness home survive stop/start/rebuild", flush=True)
+            subnet = client.networks.get(f"{prefix}-{wid}-net").attrs["IPAM"]["Config"][0]["Subnet"]
             operation("stop")
+            # A stopped workspace may have lost its container while leaving a network behind.
+            stale = client.networks.create(
+                f"{prefix}-{wid}-net",
+                driver="bridge",
+                labels={"launcher.managed": prefix},
+                ipam=docker.types.IPAMConfig(pool_configs=[docker.types.IPAMPool(subnet=subnet)]),
+            )
+            cleanup_deadline = time.monotonic() + 15
+            while time.monotonic() < cleanup_deadline:
+                if not client.networks.list(filters={"id": stale.id}):
+                    break
+                time.sleep(0.5)
+            else:
+                raise RuntimeError("Stopped workspace left a stale network")
+            print("PASS: reconciliation removes residual networks without a container", flush=True)
         finally:
             for process in reversed(processes):
                 process.terminate()

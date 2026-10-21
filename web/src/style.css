@@ -1231,6 +1231,88 @@ td strong {
   gap: 5px;
   color: var(--blue);
 }
+.template-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+  gap: 16px;
+  padding: 20px;
+}
+.template-card {
+  min-width: 0;
+  padding: 20px;
+  background: var(--surface-subtle);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.template-card-heading,
+.template-card-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.template-card-heading > svg {
+  color: var(--blue);
+}
+.template-card p {
+  margin: 15px 0;
+  font-size: 12px;
+  line-height: 1.8;
+  color: var(--text-secondary);
+}
+.image-reference {
+  display: block;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.8;
+  margin-bottom: 15px;
+}
+.template-card > small {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.template-card-actions {
+  margin-top: 20px;
+}
+.create-template-select {
+  max-width: 480px;
+  margin-top: 20px;
+}
+.environment-controls {
+  margin-top: 24px;
+}
+.environment-info + .environment-controls {
+  margin-top: 24px;
+}
+.batch-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 15px 24px;
+  border-bottom: 1px solid var(--border);
+}
+.batch-select {
+  display: inline-flex;
+  align-items: center;
+  flex-direction: row;
+  margin: 0 auto 0 0;
+}
+input.row-select {
+  width: 16px;
+  height: 16px;
+  min-height: 0;
+  padding: 0;
+  accent-color: var(--accent-fill);
+}
+.upgrade-select {
+  width: 180px;
+  min-height: 32px;
+  padding: 6px;
+  font-size: 11px;
+  margin-right: 12px;
+}
 .modal-backdrop {
   position: fixed;
   inset: 0;

@@ -8,7 +8,9 @@ The cross-repository boundary is defined in [Launcher ↔ Harness Docker runtime
 - `security.py`: Argon2 passwords, opaque hashed login sessions, CSRF and encrypted secrets.
 - `services.py`: ownership, resource admission, idempotent operation submission.
 - `worker.py`: single-host operation processing, lease recovery, actual/desired-state reconciliation.
-- `runtime.py`: pinned runzhliu Docker adapter, resource constraints, config rendering, native authentication.
+- `templates.py`: immutable published template versions, per-space snapshots and effective resource limits.
+- `runtime_types.py`: independent RuntimeSpec / RuntimeHandle adapter contract.
+- `runtime.py`: pinned runzhliu Docker adapter, resource constraints, compatibility config rendering, native authentication and connection recovery.
 - `proxy.py`: HTTP/streaming/WebSocket forwarding, runtime cookie injection, authorization rechecks.
 - `files.py`: directory-descriptor file traversal; symlinks and special files rejected.
 - `web/src`: React member and administrator flows.
@@ -23,7 +25,8 @@ The database is the source of desired state. Docker is the source of observed ru
 4. It creates an instance network and resource-constrained container, then uses the native launch token on the server to acquire a Harness session cookie.
 5. Only after an authenticated readiness check does it publish the runtime address and encrypted cookie.
 6. Failures release the reservation, clean up runtime resources, preserve user storage and record a sanitized error.
-7. Reconciliation detects exit/disable states. Expired operation leases are retried after worker recovery.
+7. Reconciliation restores proxy network membership and native authentication after control-container replacement without replacing the running user container. Lost containers become errors; temporary connection failures enter recovering and retry.
+8. Expired operation leases are retried after worker recovery. Optional runtime deadlines enqueue ordinary stop operations without resetting the deadline during reconnection.
 
 One host and one worker are intentional MVP constraints. The file lock is shared in the data root. PostgreSQL admission transactions plus the operation uniqueness constraint provide API-side concurrency safety. Docker names, workspace IDs and labels permit idempotent recovery.
 
@@ -73,3 +76,11 @@ These bridge networks allow outbound connectivity so the agent can use its confi
 The workspace file tree and Harness home survive all lifecycle operations. The instance is replaceable; data is not deleted as part of stopping/rebuilding. Generated files are kept outside the writable project/home roots and mounted read-only.
 
 Schema bootstrap is currently SQLModel `create_all`; production upgrades need versioned migrations before changing persisted structures. Upgrading the runtime image requires checking upstream state compatibility, taking a stopped-space backup, running the smoke test and testing actual gateway/tool behavior. Do not automatically downgrade a migrated Harness home.
+
+## Templates and versions
+
+RuntimeTemplate rows are editable drafts until publication; published content is immutable and can only be enabled/disabled. New versions are separate rows. WorkspaceRuntime stores the desired snapshot, applied snapshot, pinned image ID, observed image identity and optional runtime deadline. New workspaces choose a published enabled template; retiring it does not invalidate existing snapshots. Resources are capped by both template defaults and member quotas.
+
+Explicit template changes require an optimistic workspace configuration version and a matching administrator-declared data compatibility group. Admin upgrades combine a snapshot change with a queued rebuild. Images must already exist on the Docker host; publishing is an administrator approval, not an image build or compatibility certification. The worker never queries model providers to decide container readiness.
+
+This release adds two tables and idempotently backfills old spaces; it does not ALTER existing account/workspace tables or migrate Harness home formats. Legacy spaces retain their owner resource limits and adopt the observed image when the worker reconnects. Future schema changes still require explicit migration design.

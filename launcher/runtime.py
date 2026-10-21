@@ -14,10 +14,14 @@ import docker
 import httpx
 import yaml
 from docker.errors import NotFound
+from sqlmodel import Session
 
 from launcher.models import Platform, User, Workspace
+from launcher.runtime_types import RuntimeHandle, RuntimeSpec
+from launcher.schemas import TemplateSpec
 from launcher.security import decrypt, encrypt
 from launcher.settings import settings
+from launcher.templates import effective_resources, runtime_binding
 
 BASE_SOURCE = "https://github.com/runzhliu/deepseek-harness-docker"
 BASE_COMMIT = "d482839b469562df36e450c6146ca7afea046a7e"
@@ -92,6 +96,28 @@ def render_config(ws: Workspace, platform: Platform):
     return root
 
 
+def build_runtime_spec(db: Session, ws: Workspace, user: User) -> RuntimeSpec:
+    binding = runtime_binding(db, ws)
+    snapshot = binding.snapshot
+    template = TemplateSpec.model_validate(snapshot["spec"])
+    resources = effective_resources(snapshot, user)
+    return RuntimeSpec(
+        workspace_id=ws.id,
+        config_version=ws.config_version,
+        image=binding.pinned_image_id or snapshot["image"],
+        image_ref=snapshot["image"],
+        template_id=snapshot["id"],
+        template_version=snapshot["version"],
+        root=workspace_root(ws.id),
+        public_url=f"{settings().public_url}/w/{ws.id}/",
+        cpu=resources["cpu"],
+        memory_mb=resources["memory_mb"],
+        tmp_mb=template.tmp_mb,
+        startup_patches=tuple(template.startup_patches),
+        environment={**template.environment, "LAUNCHER_MODEL_TOKEN": decrypt(ws.token_encrypted)},
+    )
+
+
 class DockerRuntime:
     def __init__(self):
         self.cfg = settings()
@@ -110,7 +136,10 @@ class DockerRuntime:
             result = self.client.containers.get(self.name(workspace_id))
         except NotFound:
             return None
-        if result.labels.get("launcher.managed") != self.cfg.docker_prefix:
+        if (
+            result.labels.get("launcher.managed") != self.cfg.docker_prefix
+            or result.labels.get("launcher.workspace") != workspace_id
+        ):
             raise RuntimeFailure("同名容器不属于本平台，请管理员检查")
         return result
 
@@ -171,41 +200,39 @@ class DockerRuntime:
         container = self.container(workspace_id)
         return container.status if container else "missing"
 
-    def start(self, ws: Workspace, user: User, platform: Platform, rebuild: bool = False):
+    def start(self, spec: RuntimeSpec, rebuild: bool = False) -> RuntimeHandle:
         cfg = self.cfg
         cfg.data_root.mkdir(parents=True, exist_ok=True)
         if shutil.disk_usage(cfg.data_root).free < cfg.min_free_disk_mb * 1024**2:
             raise RuntimeFailure("宿主机可用磁盘空间不足")
-        container = self.container(ws.id)
+        container = self.container(spec.workspace_id)
         if container and (
             rebuild
-            or container.labels.get("launcher.config-version") != str(ws.config_version)
+            or container.labels.get("launcher.config-version") != str(spec.config_version)
             or container.status != "running"
         ):
-            self.stop(ws.id)
+            self.stop(spec.workspace_id)
             container = None
         if not container:
-            root = render_config(ws, platform)
-            network = self.network(ws.id)
+            root = spec.root
+            network = self.network(spec.workspace_id)
             try:
-                self.client.images.get(cfg.runtime_image)
+                image = self.client.images.get(spec.image)
             except NotFound:
-                raise RuntimeFailure(
-                    "运行镜像尚未准备，请管理员执行 docker compose --profile images pull runtime-image"
-                ) from None
-            public_url = f"{cfg.public_url}/w/{ws.id}/"
+                raise RuntimeFailure("模板镜像尚未准备，请管理员先拉取模板指定的镜像") from None
             container = self.client.containers.create(
-                cfg.runtime_image,
-                name=self.name(ws.id),
+                image.id,
+                name=self.name(spec.workspace_id),
                 command=[
                     "web",
                     "--patch",
                     "/opt/deepseek-harness/web.cordis.patch.yml",
+                    *[arg for path in spec.startup_patches for arg in ("--patch", path)],
                     "--patch",
                     "/run/launcher/launcher.patch.yml",
                     "--no-open",
                     "--public-url",
-                    public_url,
+                    spec.public_url,
                     "--trusted-host",
                     urlsplit(cfg.public_url).netloc,
                 ],
@@ -217,7 +244,7 @@ class DockerRuntime:
                     "DSH_DESKTOP_ENABLED": "0",
                     "DSH_BROWSER_USE_ENABLED": "0",
                     "DSH_TELEMETRY_DISABLED": "1",
-                    "LAUNCHER_MODEL_TOKEN": decrypt(ws.token_encrypted),
+                    **spec.environment,
                 },
                 volumes={
                     str(root / "project"): {"bind": "/workspace", "mode": "rw"},
@@ -228,17 +255,20 @@ class DockerRuntime:
                 network=network.name,
                 read_only=True,
                 ports={"3080/tcp": ("127.0.0.1", None)} if not cfg.control_containers else None,
-                tmpfs={"/tmp": "rw,noexec,nosuid,nodev,size=536870912"},
+                tmpfs={"/tmp": f"rw,noexec,nosuid,nodev,size={spec.tmp_mb * 1024**2}"},
                 cap_drop=["ALL"],
                 security_opt=["no-new-privileges:true"],
-                mem_limit=f"{user.memory_mb}m",
-                memswap_limit=f"{user.memory_mb}m",
-                nano_cpus=int(user.cpu * 1e9),
+                mem_limit=f"{spec.memory_mb}m",
+                memswap_limit=f"{spec.memory_mb}m",
+                nano_cpus=int(spec.cpu * 1e9),
                 pids_limit=256,
                 labels={
                     "launcher.managed": cfg.docker_prefix,
-                    "launcher.workspace": ws.id,
-                    "launcher.config-version": str(ws.config_version),
+                    "launcher.workspace": spec.workspace_id,
+                    "launcher.config-version": str(spec.config_version),
+                    "launcher.template": spec.template_id,
+                    "launcher.template-version": spec.template_version,
+                    "launcher.image-ref": spec.image_ref,
                 },
                 log_config=docker.types.LogConfig(
                     type="json-file", config={"max-size": "10m", "max-file": "2"}
@@ -246,8 +276,22 @@ class DockerRuntime:
                 restart_policy={"Name": "no"},
             )
             container.start()
-        deadline = time.monotonic() + cfg.startup_timeout
-        host = urlsplit(cfg.public_url).netloc
+        self.network(spec.workspace_id)
+        return self._connect(container, spec, "", cfg.startup_timeout)
+
+    def recover(self, spec: RuntimeSpec, encrypted_cookie: str) -> RuntimeHandle:
+        container = self.container(spec.workspace_id)
+        if not container or container.status != "running":
+            raise RuntimeFailure("运行容器已退出")
+        # Reconnect newly-created API/Worker containers without replacing the user's container.
+        self.network(spec.workspace_id)
+        return self._connect(container, spec, encrypted_cookie, 8)
+
+    def _connect(self, container, spec: RuntimeSpec, encrypted_cookie: str, timeout: int) -> RuntimeHandle:
+        cfg = self.cfg
+        deadline = time.monotonic() + timeout
+        host = urlsplit(spec.public_url).netloc
+        existing_cookie = decrypt(encrypted_cookie)
         with httpx.Client(trust_env=False, timeout=4, follow_redirects=False) as http:
             while time.monotonic() < deadline:
                 container.reload()
@@ -255,11 +299,35 @@ class DockerRuntime:
                     raise RuntimeFailure("Harness 进程提前退出，请管理员检查镜像配置和容器日志")
                 network_data = container.attrs["NetworkSettings"]["Networks"]
                 if cfg.control_containers:
-                    address = f"http://{network_data[self.name(ws.id) + '-net']['IPAddress']}:3080"
+                    address = (
+                        f"http://{network_data[self.name(spec.workspace_id) + '-net']['IPAddress']}:3080"
+                    )
                 else:
                     # Docker Desktop does not route container bridge IPs to the host.
                     binding = container.attrs["NetworkSettings"]["Ports"]["3080/tcp"][0]
                     address = f"http://127.0.0.1:{binding['HostPort']}"
+
+                def handle(cookie):
+                    return RuntimeHandle(
+                        address=address,
+                        encrypted_cookie=encrypt(cookie),
+                        image_id=container.attrs["Image"],
+                        image_ref=container.labels.get(
+                            "launcher.image-ref", container.attrs["Config"]["Image"]
+                        ),
+                        config_version=int(container.labels.get("launcher.config-version", "0")),
+                        template_id=container.labels.get("launcher.template", ""),
+                        template_version=container.labels.get("launcher.template-version", ""),
+                    )
+
+                if existing_cookie:
+                    try:
+                        response = http.get(f"{address}/", headers={"Host": host, "Cookie": existing_cookie})
+                        if response.status_code == 200:
+                            return handle(existing_cookie)
+                    except httpx.HTTPError:
+                        pass
+                    existing_cookie = ""
                 # Never persist or expose the launch token or raw container logs.
                 logs = container.logs(tail=150).decode(errors="replace")
                 urls = re.findall(r"dsh web:\s+(https?://\S+)", logs)
@@ -274,8 +342,26 @@ class DockerRuntime:
                             if response.status_code in (200, 302, 303) and cookie:
                                 ready = http.get(f"{address}/", headers={"Host": host, "Cookie": cookie})
                                 if ready.status_code == 200:
-                                    return address, encrypt(cookie)
+                                    return handle(cookie)
                         except httpx.HTTPError:
                             pass
                 time.sleep(1)
         raise RuntimeFailure("Harness 启动超时，可以重试或请管理员检查运行环境")
+
+    def cleanup_orphans(self, workspace_ids: set[str]):
+        for container in self.client.containers.list(
+            all=True, filters={"label": f"launcher.managed={self.cfg.docker_prefix}"}
+        ):
+            workspace_id = container.labels.get("launcher.workspace", "")
+            if re.fullmatch(r"[a-f0-9]{32}", workspace_id) and workspace_id not in workspace_ids:
+                self.stop(workspace_id)
+        for network in self.client.networks.list(
+            filters={"label": f"launcher.managed={self.cfg.docker_prefix}"}
+        ):
+            prefix = f"{self.cfg.docker_prefix}-"
+            workspace_id = network.name.removeprefix(prefix).removesuffix("-net")
+            if re.fullmatch(r"[a-f0-9]{32}", workspace_id) and workspace_id not in workspace_ids:
+                network.reload()
+                for container_id in list(network.attrs.get("Containers", {})):
+                    network.disconnect(container_id, force=True)
+                network.remove()

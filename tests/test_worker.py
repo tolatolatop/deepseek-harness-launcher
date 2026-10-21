@@ -4,7 +4,8 @@ from sqlmodel import Session, select
 
 from launcher.db import engine
 from launcher.models import Operation, Platform, Workspace
-from launcher.runtime import RuntimeFailure, render_config, workspace_root
+from launcher.runtime import RuntimeFailure, workspace_root
+from launcher.runtime_types import RuntimeHandle
 from launcher.security import encrypt
 from launcher.worker import process_one, reconcile
 from tests.conftest import configured_workspace, login
@@ -15,12 +16,27 @@ class FakeRuntime:
         self.running = {}
         self.fail = False
 
-    def start(self, ws, user, platform, rebuild=False):
+    def start(self, spec, rebuild=False):
         if self.fail:
             raise RuntimeFailure("启动超时")
-        render_config(ws, platform)
-        self.running[ws.id] = True
-        return "http://127.0.0.1:3080", encrypt("session=example")
+        self.running[spec.workspace_id] = spec
+        return self.recover(spec, "")
+
+    def recover(self, spec, encrypted_cookie):
+        actual = self.running[spec.workspace_id]
+        return RuntimeHandle(
+            "http://127.0.0.1:3080",
+            encrypt("session=example"),
+            "sha256:" + "a" * 64,
+            actual.image_ref,
+            actual.config_version,
+            actual.template_id,
+            actual.template_version,
+        )
+
+    def cleanup_orphans(self, workspace_ids):
+        for workspace_id in set(self.running) - workspace_ids:
+            self.stop(workspace_id)
 
     def stop(self, workspace_id):
         self.running.pop(workspace_id, None)

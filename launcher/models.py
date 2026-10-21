@@ -106,3 +106,29 @@ class AuditEvent(TableModel, table=True):
 class WorkerHeartbeat(TableModel, table=True):
     id: str = Field(default="primary", primary_key=True, max_length=32)
     updated_at: float = Field(default_factory=now, sa_type=Double)
+
+
+class RuntimeTemplate(TableModel, table=True):
+    __table_args__ = (UniqueConstraint("slug", "version"), TABLE_OPTIONS)
+    id: str = Field(default_factory=uid, primary_key=True, max_length=32)
+    slug: str = Field(max_length=64, index=True)
+    name: str = Field(max_length=60)
+    version: str = Field(max_length=32)
+    description: str = Field(default="", sa_type=Text)
+    image: str = Field(sa_type=Text)
+    spec: dict = Field(sa_column=Column(JSON, nullable=False))
+    published: bool = False
+    enabled: bool = True
+    created_at: float = Field(default_factory=now, sa_type=Double)
+
+
+class WorkspaceRuntime(TableModel, table=True):
+    workspace_id: str = Field(primary_key=True, foreign_key="workspace.id", max_length=32)
+    snapshot: dict = Field(sa_column=Column(JSON, nullable=False))
+    applied_snapshot: dict = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
+    pinned_image_id: str = Field(default="", max_length=80)
+    actual_image_id: str = Field(default="", max_length=80)
+    actual_image_ref: str = Field(default="", sa_type=Text)
+    checked_at: float = Field(default=0, sa_type=Double)
+    max_runtime_minutes: int | None = None
+    stop_at: float | None = Field(default=None, sa_type=Double)

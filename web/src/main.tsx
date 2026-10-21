@@ -41,6 +41,12 @@ import {
 } from "lucide-react";
 import "./style.css";
 import { ThemeSelect } from "./theme";
+import {
+  TemplateManager,
+  WorkspaceEnvironment,
+  type EnvironmentTemplate,
+  type WorkspaceRuntime,
+} from "./environments";
 
 declare global {
   interface Window {
@@ -103,8 +109,10 @@ type Workspace = {
   config_version: number;
   applied_version: number;
   entry_url: string;
+  runtime?: WorkspaceRuntime;
 };
 type Catalog = {
+  templates: EnvironmentTemplate[];
   models: string[];
   gateway_configured: boolean;
   template_name: string;
@@ -127,6 +135,7 @@ const statusNames: Record<string, string> = {
   running: "运行中",
   stopped: "已停止",
   starting: "正在启动",
+  recovering: "正在恢复连接",
   stopping: "正在停止",
   error: "需要处理",
 };
@@ -177,6 +186,7 @@ function App() {
     null,
   );
   const [busy, setBusy] = useState(false);
+  const [selectedTemplate, setSelectedTemplate] = useState("");
   const notify = useCallback(
     (text: string, error = false) => setNotice({ text, error }),
     [],
@@ -425,7 +435,10 @@ function App() {
                     <div>
                       <h2>{ws?.name || "你的第一个工作空间"}</h2>
                       <p>
-                        {catalog?.template_name || "标准开发环境"}
+                        {ws?.runtime?.template_name ||
+                          catalog?.template_name ||
+                          "标准开发环境"}
+                        {ws?.runtime && ` · ${ws.runtime.template_version}`}
                         <span className="inline-divider" />
                         DeepSeek Harness
                       </p>
@@ -445,15 +458,42 @@ function App() {
                       {ws.error}
                     </div>
                   )}
+                  {!ws && (
+                    <label className="create-template-select">
+                      运行环境模板
+                      <select
+                        aria-label="运行环境模板"
+                        value={
+                          selectedTemplate || catalog?.templates[0]?.id || ""
+                        }
+                        onChange={(event) =>
+                          setSelectedTemplate(event.target.value)
+                        }
+                      >
+                        {!catalog?.templates.length && (
+                          <option value="">暂无已发布模板，请联系管理员</option>
+                        )}
+                        {catalog?.templates.map((template) => (
+                          <option key={template.id} value={template.id}>
+                            {template.name} · {template.version} ·{" "}
+                            {template.spec.cpu} 核 /{" "}
+                            {template.spec.memory_mb / 1024} GB
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
                   <div className="workspace-actions">
                     {!ws ? (
                       <button
                         className="button primary"
-                        disabled={busy}
+                        disabled={busy || !catalog?.templates.length}
                         onClick={() =>
                           run(async () => {
                             const created = await api("/workspaces", "POST", {
                               name: `${user.display_name}的工作空间`,
+                              template_id:
+                                selectedTemplate || catalog?.templates[0]?.id,
                             });
                             setWs(created);
                             await refresh();
@@ -476,7 +516,9 @@ function App() {
                         进入 DeepSeek
                         <ArrowUpRight size={18} />
                       </a>
-                    ) : ["starting", "stopping"].includes(ws.status) ? (
+                    ) : ["starting", "stopping", "recovering"].includes(
+                        ws.status,
+                      ) ? (
                       <button className="button primary" disabled>
                         <Spinner />
                         {statusNames[ws.status]}
@@ -491,7 +533,7 @@ function App() {
                         启动工作空间
                       </button>
                     )}
-                    {ws?.status === "running" && (
+                    {ws && ["running", "recovering"].includes(ws.status) && (
                       <button
                         className="button secondary"
                         disabled={busy}
@@ -568,14 +610,14 @@ function App() {
                 <Resource
                   icon={<Cpu />}
                   label="计算资源"
-                  value={`${user.cpu}`}
+                  value={`${ws?.runtime?.resources.cpu ?? user.cpu}`}
                   unit="vCPU"
                   description="运行时 CPU 上限"
                 />
                 <Resource
                   icon={<MemoryStick />}
                   label="运行内存"
-                  value={`${user.memory_mb / 1024}`}
+                  value={`${(ws?.runtime?.resources.memory_mb ?? user.memory_mb) / 1024}`}
                   unit="GB"
                   description="运行时内存上限"
                 />
@@ -1042,6 +1084,14 @@ function Settings({
             }
           }}
         >
+          <WorkspaceEnvironment
+            workspace={ws}
+            templates={catalog?.templates || []}
+            request={api}
+            refresh={refresh}
+            notify={notify}
+            disabled={busy || dirty}
+          />
           <section className="panel settings-panel">
             <div className="section-intro">
               <span className="section-icon">
@@ -1283,18 +1333,22 @@ function Admin({
   const [audit, setAudit] = useState<any[]>([]);
   const [showCreate, setShowCreate] = useState(false);
   const [quotaUser, setQuotaUser] = useState<User | null>(null);
+  const [templates, setTemplates] = useState<EnvironmentTemplate[]>([]);
+  const [selectedSpaces, setSelectedSpaces] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const load = useCallback(async () => {
-    const [u, w, p, a] = await Promise.all([
+    const [u, w, p, a, t] = await Promise.all([
       api("/admin/users"),
       api("/admin/workspaces"),
       api("/admin/platform"),
       api("/admin/audit"),
+      api("/admin/templates"),
     ]);
     setUsers(u);
     setSpaces(w);
     setPlatform(p);
     setAudit(a);
+    setTemplates(t);
   }, []);
   useEffect(() => {
     load().catch((e) => notify(e.message, true));
@@ -1332,6 +1386,7 @@ function Admin({
         {[
           ["members", "团队成员"],
           ["instances", "运行空间"],
+          ["templates", "运行模板"],
           ["platform", "环境与模型"],
           ["audit", "操作记录"],
         ].map(([id, text]) => (
@@ -1344,6 +1399,14 @@ function Admin({
           </button>
         ))}
       </div>
+      {tab === "templates" && (
+        <TemplateManager
+          templates={templates}
+          request={api}
+          reload={load}
+          notify={notify}
+        />
+      )}
       {tab === "members" && (
         <section className="panel">
           <div className="panel-heading">
@@ -1432,20 +1495,101 @@ function Admin({
             <h3>全部工作空间</h3>
             <small>管理员可停止运行，文件内容仅所有者可访问</small>
           </div>
+          <div className="batch-toolbar">
+            <label className="batch-select">
+              <input
+                className="row-select"
+                type="checkbox"
+                aria-label="选择全部空间"
+                checked={
+                  spaces.length > 0 && selectedSpaces.length === spaces.length
+                }
+                onChange={(event) =>
+                  setSelectedSpaces(
+                    event.target.checked ? spaces.map((w) => w.id) : [],
+                  )
+                }
+              />
+              已选择 {selectedSpaces.length} 个空间
+            </label>
+            {(["start", "stop", "restart"] as const).map((action) => (
+              <button
+                key={action}
+                className="button secondary small"
+                disabled={busy || !selectedSpaces.length}
+                onClick={async () => {
+                  if (
+                    action !== "start" &&
+                    !confirm("此操作会中断所选空间的运行任务，是否继续？")
+                  )
+                    return;
+                  setBusy(true);
+                  try {
+                    const result = await api(
+                      "/admin/workspaces/actions",
+                      "POST",
+                      { workspace_ids: selectedSpaces, action },
+                    );
+                    await load();
+                    const failed = result.results.filter((r: any) => !r.ok);
+                    notify(
+                      `${result.results.length - failed.length} 个操作已提交${
+                        failed.length
+                          ? `，${failed.length} 个未提交：${failed
+                              .map((r: any) => r.message)
+                              .slice(0, 2)
+                              .join("；")}`
+                          : ""
+                      }`,
+                      failed.length > 0,
+                    );
+                  } catch (error) {
+                    notify((error as Error).message, true);
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+              >
+                批量
+                {action === "start"
+                  ? "启动"
+                  : action === "stop"
+                    ? "停止"
+                    : "重启"}
+              </button>
+            ))}
+          </div>
           <div className="table-scroll">
             <table>
               <thead>
                 <tr>
+                  <th>选择</th>
                   <th>工作空间</th>
                   <th>所有者</th>
                   <th>状态</th>
                   <th>配置</th>
+                  <th>环境版本</th>
                   <th>操作</th>
                 </tr>
               </thead>
               <tbody>
                 {spaces.map((w) => (
                   <tr key={w.id}>
+                    <td>
+                      <input
+                        className="row-select"
+                        type="checkbox"
+                        aria-label={`选择 ${w.name}`}
+                        checked={selectedSpaces.includes(w.id)}
+                        onChange={(event) =>
+                          setSelectedSpaces((ids) =>
+                            event.target.checked
+                              ? [...ids, w.id]
+                              : ids.filter((id) => id !== w.id),
+                          )
+                        }
+                      />
+                    </td>
                     <td>
                       <strong>{w.name}</strong>
                     </td>
@@ -1459,6 +1603,66 @@ function Admin({
                       v{w.applied_version} / v{w.config_version}
                     </td>
                     <td>
+                      <strong>
+                        {w.runtime?.template_name} ·{" "}
+                        {w.runtime?.template_version}
+                      </strong>
+                      <small className="subtext">
+                        {w.runtime?.actual_image_id
+                          ? w.runtime.actual_image_id.slice(0, 19)
+                          : "未运行"}
+                      </small>
+                    </td>
+                    <td>
+                      <select
+                        className="upgrade-select"
+                        aria-label={`升级 ${w.name}`}
+                        value={w.runtime?.template_id || ""}
+                        disabled={busy}
+                        onChange={(event) => {
+                          const templateId = event.target.value;
+                          if (
+                            confirm(
+                              "升级会重建此空间的运行容器，并保留原项目和会话。是否继续？",
+                            )
+                          )
+                            mutate(
+                              () =>
+                                api(
+                                  `/admin/workspaces/${w.id}/upgrade`,
+                                  "POST",
+                                  {
+                                    template_id: templateId,
+                                    expected_version: w.config_version,
+                                  },
+                                ),
+                              "环境升级已提交",
+                            );
+                        }}
+                      >
+                        {w.runtime &&
+                          !templates.some(
+                            (t) => t.id === w.runtime?.template_id && t.enabled,
+                          ) && (
+                            <option value={w.runtime.template_id}>
+                              {w.runtime.template_name}（已停用）
+                            </option>
+                          )}
+                        {templates
+                          .filter(
+                            (t) =>
+                              t.published &&
+                              t.enabled &&
+                              (!w.runtime ||
+                                t.spec.compatibility_group ===
+                                  w.runtime.compatibility_group),
+                          )
+                          .map((t) => (
+                            <option key={t.id} value={t.id}>
+                              {t.name} · {t.version}
+                            </option>
+                          ))}
+                      </select>
                       <button
                         className="text-link danger-text"
                         disabled={busy || w.status === "stopped"}
@@ -1496,7 +1700,7 @@ function Admin({
                 api("/admin/platform", "PUT", {
                   gateway_url: data.get("gateway_url"),
                   models: String(data.get("models")).split("\n"),
-                  template_name: data.get("template_name"),
+                  template_name: platform.template_name,
                 }),
               "团队配置已保存，现有实例需重启应用",
             );
@@ -1545,18 +1749,12 @@ function Admin({
                 <Box />
               </span>
               <div>
-                <h3>默认环境</h3>
-                <p>所有新空间使用这套预置环境。</p>
+                <h3>平台运行设置</h3>
+                <p>
+                  新空间从已发布的运行模板中选择环境，镜像和版本随空间保存。
+                </p>
               </div>
             </div>
-            <label>
-              模板名称
-              <input
-                name="template_name"
-                defaultValue={platform.template_name}
-                required
-              />
-            </label>
             <div className="environment-info">
               <span>运行底座</span>
               <code>{platform.runtime_image.split("@")[0]}</code>

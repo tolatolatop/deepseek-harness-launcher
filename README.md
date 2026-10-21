@@ -16,6 +16,9 @@ Python / FastAPI + React 的企业团队 Harness 启动器。成员通过一个�
 - 对接现有 NEW API，管理员配置模型目录，成员绑定独立模型调用令牌；凭证加密存储。
 - 默认模型、回复语言、个人指令、可选会话自动命名插件；显示待应用配置版本。
 - 管理成员资源配额、全部实例状态、停止实例和审计记录。
+- 运行模板草稿、发布与停用；空间创建时选择版本，保存独立快照，展示实际镜像。
+- 显式切换兼容模板、管理员提交升级、批量启停/重启，以及可选的到期停止。
+- Launcher 重启后自动恢复空间代理连接和原生认证，保留正在运行的用户容器。
 - CPU、内存、进程数限制。磁盘阈值是告警参考，不是文件系统硬配额。
 
 用户通过 `/launcher/w/{workspace_id}/` 进入自己的空间，无需新增域名、DNS、LiteLLM 或 Kubernetes。
@@ -139,9 +142,23 @@ LAUNCHER_DATABASE_URL=mysql+pymysql://launcher:URL_ENCODED_PASSWORD@mysql-host:3
 
 部署前选择不与企业 LAN/VPN 或其他 Docker 网络重叠的地址池。分配器跳过已有 Docker 子网，不会修改其他项目的网络。
 
+## 运行模板与实例维护
+
+管理员进入「管理后台 → 运行模板」，创建草稿，填写名称、版本、镜像摘要、资源默认值和说明，确认后发布。草稿可以编辑，发布后需要创建新版本来修改内容。停用模板会从新建空间的选择列表移除，已有空间仍使用自己的快照。
+
+镜像需先在 Docker 主机准备好，引用格式为 `repository@sha256:<64 位摘要>`。模板发布不执行镜像构建或拉取；标准内置模板从首次初始化时的 `LAUNCHER_RUNTIME_IMAGE` 生成，之后修改该变量不会改写已保存模板。自定义镜像应继承兼容的 runzhliu 底座并保留 ENTRYPOINT 和运行接口。模板可增加镜像 `/opt` 中的 YAML 补丁，但不能挂载任意宿主目录或覆盖启动器保留变量。
+
+成员在开通空间时选择模板，在「空间设置 → 运行环境」查看模板版本和实际镜像，也可保存其他兼容模板，随后重启应用。管理员在「运行空间」中可选择模板直接提交升级，或勾选空间批量启动、停止和重启。批量操作逐项返回结果，额度不足或操作冲突不会被显示为成功。
+
+模板的数据兼容组由发布者声明。切换时必须相同，但这不代替对 Harness 数据格式的真实验证；升级前应验证镜像，发生不可逆数据迁移时不能仅靠切回旧镜像回退。实际 CPU、内存同时受模板默认值和成员配额限制。
+
+「每次启动的最长运行时间」默认不限时。设置后每次启动/重启开始计时，修改运行中策略从保存时重新计时；Launcher 重启和恢复代理连接不会延长截止时间。到期将中断运行任务并停止容器，项目和会话保留。
+
+新增的 `runtimetemplate`、`workspaceruntime` 表在 API 初始化时创建，并幂等补齐旧空间记录。既有账号和空间表不修改；旧运行容器由 Worker 自动接管并记录实际镜像。恢复期间显示「正在恢复连接」，不用人工重新挂接空间网络。
+
 ## 测试
 
-后端测试覆盖登录、权限、配置、文件、代理、生命周期及并发资源分配；同一套测试可在 SQLite 和真实 MySQL 上执行。首版还验证了管理员到成员的浏览器操作流程、真实 Harness 容器与原生浏览器界面，以及 Docker Compose + PostgreSQL 下的启动、停止和文件持久化。
+后端测试覆盖登录、权限、配置、文件、代理、生命周期及并发资源分配；同一套测试可在 SQLite、PostgreSQL 和 MySQL 上执行。首版还验证了管理员到成员的浏览器操作流程、真实 Harness 容器与原生浏览器界面，以及 Docker Compose + PostgreSQL 下的启动、停止和文件持久化。
 
 ```bash
 uv run pytest -q
@@ -152,14 +169,21 @@ cd web && npx playwright install chromium && npm test
 
 浏览器测试使用独立临时数据库与端口 `18180`，验证登录、管理设置、创建成员、个人配置、文件传输、异步操作与移动端布局。测试没有 Docker Worker，不会创建真实实例。
 
-真实 MySQL 数据库测试（无需更改 `.env`）：
+真实 PostgreSQL 数据库测试（无需更改 `.env`）：
+
+```bash
+docker pull postgres:17-alpine
+uv run python scripts/test-postgres.py
+```
+
+真实 MySQL 数据库测试：
 
 ```bash
 docker pull mysql:8.4
 uv run python scripts/test-mysql.py
 ```
 
-脚本创建临时 MySQL 容器及随机测试库，完整运行后端测试，然后清理容器与数据卷。CI 在独立 MySQL 任务中运行同一脚本。也可设置 `LAUNCHER_TEST_MYSQL_URL` 后直接运行 `uv run pytest -q`；该测试账号必须具有创建和删除数据库的权限，测试只删除自身生成的 `launcher_test_<随机ID>` 库。
+脚本创建临时 MySQL 容器及随机测试库，完整运行后端测试，然后清理容器与数据卷。CI 分别执行 PostgreSQL 和 MySQL 测试任务。PostgreSQL 也可设置 `LAUNCHER_TEST_POSTGRES_URL` 指定测试服务。也可设置 `LAUNCHER_TEST_MYSQL_URL` 后直接运行 `uv run pytest -q`；该测试账号必须具有创建和删除数据库的权限，测试只删除自身生成的 `launcher_test_<随机ID>` 库。
 
 真实 Docker 测试：
 
@@ -188,6 +212,6 @@ DATA_ROOT/workspaces/<workspace_id>/
 - API 下载强制附件，不在 Launcher 来源内渲染上传的 HTML。路径不是浏览器来源隔离，当前只支持受控 Harness 前端；任意前端插件与网站预览不在 MVP 范围内。
 - 不应将这一版本当成面向恶意租户的强隔离服务：容器共享宿主内核，运行网络允许出站，模型可访问其容器被授权的数据和个人凭证。企业网络精细访问控制仍需在宿主防火墙／网络层部署。
 - 备份前停止空间，备份 PostgreSQL、数据根目录和 `.env` 中的加密密钥。只备份数据库无法恢复项目与会话。当前没有在线快照或一键恢复 UI。
-- 本版只支持单 Docker 宿主机、单 Worker。数据库首次建表使用 SQLModel；后续结构变更需要显式迁移，不能用 `create_all` 升级已有结构。
+- 本版只支持单 Docker 宿主机、单 Worker。本次模板版本通过新增表和幂等补齐兼容已有安装；后续涉及修改已有列的结构变更仍需要显式迁移，不能依赖 `create_all`。
 
 模块划分见 [架构说明](docs/architecture.md)。Launcher 与 Harness Docker 的启动参数、配置文件、认证代理、持久化及版本兼容要求见 [运行时接口契约](docs/runtime-contract.md)。

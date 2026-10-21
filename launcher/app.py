@@ -22,21 +22,28 @@ from launcher.models import (
     LoginSession,
     Operation,
     Platform,
+    RuntimeTemplate,
     User,
     WorkerHeartbeat,
     Workspace,
+    WorkspaceRuntime,
     now,
 )
 from launcher.proxy import proxy_http, proxy_ws
 from launcher.runtime import BASE_COMMIT, BASE_SOURCE, prepare_storage
 from launcher.schemas import (
+    BatchAction,
     LoginInput,
+    MaintenanceUpdate,
     PasswordUpdate,
     PlatformUpdate,
+    TemplateCreate,
+    TemplateState,
     UserCreate,
     UserUpdate,
     WorkspaceConfig,
     WorkspaceCreate,
+    WorkspaceTemplateChange,
 )
 from launcher.security import (
     authenticated,
@@ -61,6 +68,7 @@ from launcher.services import (
     public_workspace,
 )
 from launcher.settings import settings
+from launcher.templates import available_template, runtime_binding, template_snapshot
 
 
 def create_app() -> FastAPI:
@@ -169,30 +177,41 @@ def create_app() -> FastAPI:
             "plugins": PLUGIN_CATALOG,
             "worker_online": bool(heartbeat and now() - heartbeat.updated_at < cfg.startup_timeout + 60),
             "runtime_image": cfg.runtime_image,
+            "templates": [
+                t.model_dump()
+                for t in db.exec(
+                    select(RuntimeTemplate)
+                    .where(RuntimeTemplate.published, RuntimeTemplate.enabled)
+                    .order_by(RuntimeTemplate.created_at)
+                ).all()
+            ],
         }
 
     @api.get("/workspace")
     def my_workspace(user: User = Depends(member), db: Session = Depends(get_db)):
         ws = db.exec(select(Workspace).where(Workspace.user_id == user.id)).first()
-        return public_workspace(ws) if ws else None
+        return public_workspace(ws, db) if ws else None
 
     @api.post("/workspaces", status_code=201)
     def create_workspace(body: WorkspaceCreate, user: User = Depends(member), db: Session = Depends(get_db)):
         existing = db.exec(select(Workspace).where(Workspace.user_id == user.id)).first()
         if existing:
-            return public_workspace(existing)
+            return public_workspace(existing, db)
         platform = db.get(Platform, 1)
+        template = available_template(db, body.template_id)
         ws = Workspace(user_id=user.id, name=body.name, model=platform.models[0] if platform.models else "")
         prepare_storage(ws.id)
         db.add(ws)
-        audit(db, user, "workspace.create", ws.id)
         try:
+            db.flush()
+            db.add(WorkspaceRuntime(workspace_id=ws.id, snapshot=template_snapshot(template)))
+            audit(db, user, "workspace.create", ws.id)
             db.commit()
         except IntegrityError:
             db.rollback()
             raise HTTPException(409, "工作空间已经创建，请刷新页面") from None
         db.refresh(ws)
-        return public_workspace(ws)
+        return public_workspace(ws, db)
 
     @api.post("/workspaces/{workspace_id}/actions/{action}", status_code=202)
     def workspace_action(
@@ -209,6 +228,163 @@ def create_app() -> FastAPI:
             .order_by(Operation.created_at.desc())
             .limit(30)
         ).all()
+
+    def change_template(workspace_id: str, body: WorkspaceTemplateChange, user: User, db: Session):
+        from sqlalchemy import update
+
+        db.exec(update(Platform).where(Platform.id == 1).values(updated_at=now()))
+        ws = db.exec(
+            select(Workspace)
+            .where(Workspace.id == workspace_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).first()
+        if not ws or (user.role != "admin" and ws.user_id != user.id):
+            raise HTTPException(404, "工作空间不存在")
+        if ws.config_version != body.expected_version:
+            raise HTTPException(409, "空间配置已变化，请刷新后重试")
+        if db.exec(select(Operation).where(Operation.active_workspace_id == ws.id)).first():
+            raise HTTPException(409, "已有运行操作，请等待完成")
+        template = available_template(db, body.template_id)
+        binding = runtime_binding(db, ws)
+        if ws.desired_status == "running" and not binding.applied_snapshot:
+            raise HTTPException(409, "正在接管现有运行版本，请稍后再切换模板")
+        if binding.snapshot["spec"]["compatibility_group"] != template.spec["compatibility_group"]:
+            raise HTTPException(409, "模板的数据兼容组不同，不能直接复用现有会话目录")
+        if binding.snapshot["id"] == template.id:
+            return ws
+        binding.snapshot = template_snapshot(template)
+        binding.pinned_image_id = ""
+        ws.config_version += 1
+        db.add(binding)
+        db.add(ws)
+        audit(db, user, "workspace.template_changed", ws.id)
+        return ws
+
+    @api.put("/workspaces/{workspace_id}/template")
+    def workspace_template(
+        workspace_id: str,
+        body: WorkspaceTemplateChange,
+        user: User = Depends(member),
+        db: Session = Depends(get_db),
+    ):
+        own_workspace(db, user, workspace_id)
+        ws = change_template(workspace_id, body, user, db)
+        db.commit()
+        return public_workspace(ws, db)
+
+    @api.put("/workspaces/{workspace_id}/maintenance")
+    def maintenance(
+        workspace_id: str,
+        body: MaintenanceUpdate,
+        user: User = Depends(member),
+        db: Session = Depends(get_db),
+    ):
+        ws = own_workspace(db, user, workspace_id)
+        binding = runtime_binding(db, ws)
+        binding.max_runtime_minutes = body.max_runtime_minutes
+        binding.stop_at = (
+            now() + body.max_runtime_minutes * 60
+            if body.max_runtime_minutes and ws.status in {"running", "recovering"}
+            else None
+        )
+        db.add(binding)
+        audit(db, user, "workspace.maintenance_updated", ws.id)
+        db.commit()
+        return public_workspace(ws, db)
+
+    @api.get("/admin/templates")
+    def list_templates(user: User = Depends(admin), db: Session = Depends(get_db)):
+        return db.exec(select(RuntimeTemplate).order_by(RuntimeTemplate.created_at.desc())).all()
+
+    @api.post("/admin/templates", status_code=201)
+    def create_template(body: TemplateCreate, user: User = Depends(admin), db: Session = Depends(get_db)):
+        template = RuntimeTemplate(**body.model_dump())
+        db.add(template)
+        audit(db, user, "template.created", template.id)
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(409, "模板标识与版本已存在，请使用新版本号") from None
+        db.refresh(template)
+        return template
+
+    @api.post("/admin/templates/{template_id}/publish")
+    def publish_template(template_id: str, user: User = Depends(admin), db: Session = Depends(get_db)):
+        template = db.exec(
+            select(RuntimeTemplate).where(RuntimeTemplate.id == template_id).with_for_update()
+        ).first()
+        if not template:
+            raise HTTPException(404, "模板不存在")
+        template.published = True
+        db.add(template)
+        audit(db, user, "template.published", template.id)
+        db.commit()
+        db.refresh(template)
+        return template
+
+    @api.put("/admin/templates/{template_id}")
+    def edit_template(
+        template_id: str, body: TemplateCreate, user: User = Depends(admin), db: Session = Depends(get_db)
+    ):
+        template = db.exec(
+            select(RuntimeTemplate).where(RuntimeTemplate.id == template_id).with_for_update()
+        ).first()
+        if not template:
+            raise HTTPException(404, "模板不存在")
+        if template.published:
+            raise HTTPException(409, "已发布模板不可修改，请创建新版本")
+        for key, value in body.model_dump().items():
+            setattr(template, key, value)
+        db.add(template)
+        audit(db, user, "template.updated", template.id)
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(409, "模板标识与版本已存在") from None
+        db.refresh(template)
+        return template
+
+    @api.patch("/admin/templates/{template_id}")
+    def template_state(
+        template_id: str, body: TemplateState, user: User = Depends(admin), db: Session = Depends(get_db)
+    ):
+        template = db.get(RuntimeTemplate, template_id)
+        if not template:
+            raise HTTPException(404, "模板不存在")
+        template.enabled = body.enabled
+        db.add(template)
+        audit(db, user, "template.enabled" if body.enabled else "template.disabled", template.id)
+        db.commit()
+        db.refresh(template)
+        return template
+
+    @api.post("/admin/workspaces/{workspace_id}/upgrade", status_code=202)
+    def upgrade_workspace(
+        workspace_id: str,
+        body: WorkspaceTemplateChange,
+        user: User = Depends(admin),
+        db: Session = Depends(get_db),
+    ):
+        ws = change_template(workspace_id, body, user, db)
+        return enqueue(db, user, ws, "rebuild").model_dump()
+
+    @api.post("/admin/workspaces/actions")
+    def batch_action(body: BatchAction, user: User = Depends(admin), db: Session = Depends(get_db)):
+        results = []
+        for workspace_id in dict.fromkeys(body.workspace_ids):
+            try:
+                ws = db.get(Workspace, workspace_id)
+                if not ws:
+                    raise HTTPException(404, "空间不存在")
+                op = enqueue(db, user, ws, body.action)
+                results.append({"workspace_id": workspace_id, "ok": True, "operation_id": op.id})
+            except HTTPException as exc:
+                db.rollback()
+                results.append({"workspace_id": workspace_id, "ok": False, "message": exc.detail})
+        return {"results": results}
 
     @api.put("/workspaces/{workspace_id}/config")
     def workspace_config(
@@ -235,7 +411,7 @@ def create_app() -> FastAPI:
         audit(db, user, "workspace.config_saved", ws.id)
         db.commit()
         db.refresh(ws)
-        return public_workspace(ws)
+        return public_workspace(ws, db)
 
     @api.post("/workspaces/{workspace_id}/test-model")
     async def test_model(workspace_id: str, user: User = Depends(member), db: Session = Depends(get_db)):
@@ -368,7 +544,7 @@ def create_app() -> FastAPI:
 
     @api.get("/admin/workspaces")
     def admin_workspaces(user: User = Depends(admin), db: Session = Depends(get_db)):
-        return [public_workspace(w) for w in db.exec(select(Workspace)).all()]
+        return [public_workspace(w, db) for w in db.exec(select(Workspace)).all()]
 
     @api.post("/admin/workspaces/{workspace_id}/stop", status_code=202)
     def admin_stop(workspace_id: str, user: User = Depends(admin), db: Session = Depends(get_db)):

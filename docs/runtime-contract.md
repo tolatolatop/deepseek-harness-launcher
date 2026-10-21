@@ -43,8 +43,9 @@ flowchart LR
 当前内部适配器位于 [`launcher/runtime.py`](../launcher/runtime.py)，实际调用签名为：
 
 ```python
-DockerRuntime.start(ws: Workspace, user: User, platform: Platform, rebuild: bool = False)
-# -> tuple[str, str]: (runtime_address, encrypted_runtime_cookie)
+DockerRuntime.start(spec: RuntimeSpec, rebuild: bool = False) -> RuntimeHandle
+
+DockerRuntime.recover(spec: RuntimeSpec, encrypted_cookie: str) -> RuntimeHandle
 
 DockerRuntime.stop(workspace_id: str)
 # -> None
@@ -53,7 +54,7 @@ DockerRuntime.inspect(workspace_id: str)
 # -> str: Docker 容器状态，或 "missing"
 ```
 
-这是 Worker 的 Python 接口，不是提供给浏览器的接口，也不是 Harness 内部 HTTP 接口。现阶段参数直接使用 Launcher 数据模型，不能把这些 ORM 对象传给底座。
+这是 Worker 的 Python 接口，不是提供给浏览器的接口。Worker 从数据库和模板快照构建独立的 `RuntimeSpec`；Docker 适配器不接收 ORM 参数。`RuntimeHandle` 返回运行地址、加密原生 Cookie、实际镜像 ID/引用、已应用配置版本和模板版本。输入环境变量可包含兼容接入的临时凭据，对象的 repr 不输出这些变量；结果的 repr 不输出 Cookie。
 
 | 操作 | 语义 | 成功条件 |
 |---|---|---|
@@ -61,6 +62,7 @@ DockerRuntime.inspect(workspace_id: str)
 | `stop(id)` | 最多等待容器优雅停止 15 秒，再移除容器及专属网络 | 容器不存在；项目和 Harness home 保留 |
 | `restart` | Worker 映射为 `start(..., rebuild=True)`，使用当前配置重新创建容器 | 新配置完成启动验证 |
 | `rebuild` | 当前同样映射为 `start(..., rebuild=True)` | 使用配置的本地镜像重新创建，保留数据 |
+| `recover(spec, cookie)` | 重新连接 API/Worker 到空间网络，复核原生 Cookie，必要时重新握手；保留原容器 | 更新实际地址、凭据和观察到的版本 |
 | `inspect(id)` | 读取 Docker 实际状态 | 返回 `running`、`exited` 等 Docker 状态或 `missing` |
 
 当前 `restart` 与 `rebuild` 的执行路径相同。它们不会执行 Dockerfile 构建，也不会自动拉取新镜像；镜像拉取由部署流程负责。
@@ -74,7 +76,7 @@ GET  <base>/api/workspaces/<id>/operations
 
 提交成功返回 HTTP 202 和 Operation，代表已入队，不代表实例已就绪。一个空间最多一个活动操作；同一活动操作的重复提交返回原操作，冲突操作返回 409。操作完成之后再次提交会生成新操作，不保证无限期去重。
 
-操作状态：`queued → running → succeeded | failed`。空间状态：`stopped → starting → running → stopping → stopped`，失败进入 `error`。期望状态和 Docker 实际状态分开记录。
+操作状态：`queued → running → succeeded | failed`。空间状态：`stopped → starting → running → stopping → stopped`，失败进入 `error`；连接接管暂时失败进入 `recovering` 并重试，不替换用户容器。期望状态和 Docker 实际状态分开记录。
 
 Worker 负责租约、失败清理和状态对账。账号停用后先撤销平台访问，随后停止实例。容器意外退出会标记错误并释放名额，当前不自动反复重启失败实例。
 
@@ -87,7 +89,7 @@ Worker 从平台配置组装以下输入，底座不需要理解 Launcher 的表
 | 逻辑字段 | 来源 | 传递位置 |
 |---|---|---|
 | `workspace_id` | 空间 ID，32 位十六进制字符串 | 容器名、网络名、目录名、Docker label |
-| `image` | `LAUNCHER_RUNTIME_IMAGE` | Docker create 的镜像参数 |
+| `image` | 空间模板快照，首次运行后固定到实际镜像 ID | Docker create 的镜像参数；不跟随全局配置改变 |
 | `config_version` | 空间配置版本 | Docker label 和 `revision.json` |
 | `public_url` | 平台入口 + `/w/<id>/` | CLI `--public-url` |
 | `trusted_host` | 平台 URL 的 host:port | CLI `--trusted-host` |
@@ -171,6 +173,8 @@ web
 
 上面的 patch 示例适用于已配置完整模型连接的空间。网关、可选模型或令牌缺失时，前三项的 `disabled` 为 `true`；这仍是可启动、可进入的有效运行配置。
 
+模板新版本发布不会改变已有空间。空间显式切换模板时保存新快照、清除待运行镜像固定值并递增配置版本；已有运行版本在重启前继续工作。兼容组不同的模板不能复用现有空间；组名是管理员声明，发布前必须自行验证镜像数据兼容性。
+
 保存设置只递增 `config_version`，不热修改运行中的容器。重启或重建时应用新版本；平台网关和模型目录变更也会使所有空间配置版本递增。旧实例在重启前继续使用旧地址和配置。
 
 插件字段是平台目录 ID，不接受任意 npm 包名或挂载路径。当前仅 `session-titles` 可切换，对应底座 `session-title-llm`；文件、Shell、个人指令是固定能力。关闭原生插件管理界面是产品边界，不等于阻止拥有 Shell 能力的进程安装代码。
@@ -250,16 +254,30 @@ WebSocket 使用同一空间鉴权，校验 Origin，转发文本/二进制消�
 
 对应验证入口：`tests/test_api.py`、`tests/test_proxy.py`、`tests/test_worker.py`、`scripts/smoke.py`、`scripts/runtime-browser.mjs`。数据库默认选择和 MySQL 兼容性不改变这份运行时接口。
 
-## 8. 下一版接口建议（尚未实现）
+## 8. 模板与维护接口
 
-不要求为当前 MVP 新增 Harness 管理服务。后续优先在 Launcher 适配层推进以下改动：
+```text
+GET   <base>/api/admin/templates
+POST  <base>/api/admin/templates                    创建草稿，镜像必须带 sha256 digest
+PUT   <base>/api/admin/templates/<id>               修改未发布草稿
+POST  <base>/api/admin/templates/<id>/publish       发布；版本内容随后不可变
+PATCH <base>/api/admin/templates/<id>               启用/停用，不影响已有空间快照
+PUT   <base>/api/workspaces/<id>/template           保存期望模板，expected_version 防止覆盖
+PUT   <base>/api/workspaces/<id>/maintenance        max_runtime_minutes，null 表示不限时
+POST  <base>/api/admin/workspaces/<id>/upgrade      指定模板并入队重建
+POST  <base>/api/admin/workspaces/actions           批量 start/stop/restart，逐项返回结果
+```
 
-| 扩展 | 建议定义 | 解决的问题 |
-|---|---|---|
-| 独立输入对象 | `RuntimeSpec`，包含空间 ID、镜像 digest、配置版本、资源、路径、入口和模型配置；凭据用引用，执行时解析 | 从 `Workspace/User/Platform` ORM 参数解耦，便于其他底座 |
-| 结构化结果 | `RuntimeHandle`，包含实例 ID、实际地址、已应用版本和内部凭据引用 | 替代位置 tuple；不向前端返回内部地址和凭据 |
-| 分层探测 | `probe(workspace_id, scope=web\|gateway\|inference)`；从实际空间网络执行，记录检查时间、耗时和错误类别 | 区分进程、代理、网关和模型故障；推理探测需显式触发 |
-| 结构化失败 | `phase`、`code`、`retryable`、脱敏 `message`；如 `GATEWAY_CONNECT_TIMEOUT`、`GATEWAY_UNAUTHORIZED`、`MODEL_UNAVAILABLE` | 当前只有受控错误消息，不能按代码诊断 |
-| 机器认证启动信息 | 与底座约定受限文件或专用握手，替代解析日志；同时定义协议版本和能力列表 | 消除日志格式依赖，并防止启动 token 被运维日志采集 |
+模板 `spec` 定义接口版本、数据兼容组、CPU/内存默认值、临时目录限额、公开环境变量和镜像 `/opt` 内的启动补丁。固定 `persistent-project-home` 挂载布局，不接受任意宿主目录。实际 CPU 和内存取模板默认值与成员配额的较小值。保留环境变量不可覆盖，模板中不填写秘密。
 
-上表不是当前已存在的类、端点或镜像能力。新增版本应保留当前镜像适配器；只有契约验收通过后才将新镜像加入支持列表。
+`RuntimeTemplate` 保存模板版本；`WorkspaceRuntime` 保存空间快照、应用快照、固定镜像 ID、实际镜像、接管时间及到期策略。新增表及旧空间补齐在初始化时幂等执行，旧空间/用户表不修改。初始内置模板来自 `LAUNCHER_RUNTIME_IMAGE`；之后修改全局镜像配置不更新已保存模板。
+
+Worker 约每 10 秒重新检查运行空间的代理连接。临时接管失败保留运行名额并自动重试；容器已退出则标记错误。Worker 仅清理带本平台标签且空间 ID 已不存在的容器和网络，及期望停止空间的残留运行资源；从不清理项目和 home 数据。
+
+到期策略按每次启动/重启开始计时；更新运行中策略从保存时重新计时；平台重启和恢复连接不延长截止时间。到期生成正常停止操作并审计，可能中断正在执行的任务。批量操作逐项执行、逐项报告冲突和容量限制，不承诺整批原子成功。
+
+## 9. 后续底座协作边界
+
+下一步可与 Docker 底座约定机器可读的兼容元数据和受限认证握手，替代当前启动日志解析；当前镜像尚未提供该机制。Launcher 只维护进程、启动认证、代理网络和环境配置。模型调用、推理探测及 AI 故障诊断由 Harness 插件承担，不纳入 Launcher 运行时探测协议。
+
+外部身份绑定和授权提供方待具体接入方出现后再扩展，当前不假定对端授权协议，也不增加网关管理凭据下发。

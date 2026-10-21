@@ -13,23 +13,41 @@ from launcher.settings import settings
 
 @pytest.fixture
 def database_url(tmp_path):
-    server_url = os.environ.get("LAUNCHER_TEST_MYSQL_URL")
+    mysql_url = os.environ.get("LAUNCHER_TEST_MYSQL_URL")
+    postgres_url = os.environ.get("LAUNCHER_TEST_POSTGRES_URL")
+    if mysql_url and postgres_url:
+        raise ValueError("Choose one test database backend at a time")
+    server_url = postgres_url or mysql_url
     if not server_url:
         yield f"sqlite:///{tmp_path}/test.db"
         return
     url = make_url(server_url)
-    if url.drivername != "mysql+pymysql":
-        raise ValueError("LAUNCHER_TEST_MYSQL_URL must use mysql+pymysql")
+    expected = "postgresql+psycopg" if postgres_url else "mysql+pymysql"
+    if url.drivername != expected:
+        raise ValueError(f"Test database URL must use {expected}")
     # Never clear a supplied database. Create and drop only our own random schema.
     name = "launcher_test_" + uuid.uuid4().hex
-    admin = create_engine(url.set(database=None), isolation_level="AUTOCOMMIT")
+    admin = create_engine(
+        url.set(database="postgres" if postgres_url else None), isolation_level="AUTOCOMMIT"
+    )
     try:
         with admin.connect() as connection:
-            connection.execute(text(f"CREATE DATABASE `{name}` CHARACTER SET utf8mb4 COLLATE utf8mb4_bin"))
+            statement = (
+                f"CREATE DATABASE \"{name}\" ENCODING 'UTF8' TEMPLATE template0"
+                if postgres_url
+                else f"CREATE DATABASE `{name}` CHARACTER SET utf8mb4 COLLATE utf8mb4_bin"
+            )
+            connection.execute(text(statement))
         yield url.set(database=name).render_as_string(hide_password=False)
     finally:
         with admin.connect() as connection:
-            connection.execute(text(f"DROP DATABASE IF EXISTS `{name}`"))
+            connection.execute(
+                text(
+                    f'DROP DATABASE IF EXISTS "{name}"'
+                    if postgres_url
+                    else f"DROP DATABASE IF EXISTS `{name}`"
+                )
+            )
         admin.dispose()
 
 
