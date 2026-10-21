@@ -187,4 +187,4 @@ DATA_ROOT/workspaces/<workspace_id>/
 - 备份前停止空间，备份 PostgreSQL、数据根目录和 `.env` 中的加密密钥。只备份数据库无法恢复项目与会话。当前没有在线快照或一键恢复 UI。
 - 本版只支持单 Docker 宿主机、单 Worker。数据库首次建表使用 SQLModel；后续结构变更需要显式迁移，不能用 `create_all` 升级已有结构。
 
-更多模块与接口约定见 [架构说明](docs/architecture.md)。
+模块划分见 [架构说明](docs/architecture.md)。Launcher 与 Harness Docker 的启动参数、配置文件、认证代理、持久化及版本兼容要求见 [运行时接口契约](docs/runtime-contract.md)。

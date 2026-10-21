@@ -1,5 +1,7 @@
 # Implementation architecture
 
+The cross-repository boundary is defined in [Launcher ↔ Harness Docker runtime contract](runtime-contract.md). It distinguishes the implemented v1 adapter from proposed future interfaces.
+
 ## Responsibility and state
 
 - `app.py`: HTTP application, authenticated APIs, member/admin authorization, SPA hosting.
