@@ -6,6 +6,23 @@
     <meta name="theme-color" content="#163c73" />
     <title>DeepSeek · 团队工作台</title>
     <script>
+      // Apply the saved appearance before the first paint.
+      (() => {
+        let preference = "system";
+        try {
+          const stored = localStorage.getItem("launcher.theme");
+          if (stored === "light" || stored === "dark") preference = stored;
+        } catch {}
+        const dark =
+          preference === "dark" ||
+          (preference === "system" &&
+            matchMedia("(prefers-color-scheme: dark)").matches);
+        document.documentElement.dataset.theme = dark ? "dark" : "light";
+        document.documentElement.dataset.themePreference = preference;
+        document.querySelector('meta[name="theme-color"]').content = dark
+          ? "#111a28"
+          : "#f5f7fb";
+      })();
       window.__LAUNCHER_BASE__ = "__LAUNCHER_BASE_JSON__";
     </script>
   </head>

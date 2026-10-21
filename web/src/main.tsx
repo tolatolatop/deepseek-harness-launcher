@@ -40,6 +40,7 @@ import {
   CircleAlert,
 } from "lucide-react";
 import "./style.css";
+import { ThemeSelect } from "./theme";
 
 declare global {
   interface Window {
@@ -354,8 +355,11 @@ function App() {
             </span>
           </div>
           <span className="topbar-note">
-            <span className="dot" />
-            私有工作台
+            <span className="privacy-label">
+              <span className="dot" />
+              私有工作台
+            </span>
+            <ThemeSelect />
             <button
               className="icon-button mobile-logout"
               aria-label="退出登录"
@@ -706,6 +710,9 @@ function Login({ onLogin }: { onLogin: (value: any) => void }) {
   const [error, setError] = useState("");
   return (
     <div className="login-screen">
+      <div className="login-appearance">
+        <ThemeSelect />
+      </div>
       <div className="login-story">
         <a className="brand" href="#">
           <span className="brand-icon">
