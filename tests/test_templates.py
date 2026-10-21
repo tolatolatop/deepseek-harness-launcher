@@ -263,6 +263,36 @@ def test_recovery_failure_retries_without_replacing_container(client, monkeypatc
     current = client.get("/launcher/api/workspace").json()
     assert current["status"] == "recovering" and current["desired_status"] == "running"
     assert runtime.running[ws["id"]] is original
+
     reconcile(runtime)
     assert client.get("/launcher/api/workspace").json()["status"] == "running"
     assert runtime.running[ws["id"]] is original
+
+
+def test_concurrent_publish_and_edit_preserve_published_snapshot(client):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    login(client)
+    t = template(client)
+    body = {key: t[key] for key in ("slug", "name", "version", "description", "image", "spec")}
+    body["description"] = "concurrent edit"
+    barrier = Barrier(2)
+
+    def publish_now():
+        barrier.wait(timeout=10)
+        return client.post(f"/launcher/api/admin/templates/{t['id']}/publish")
+
+    def edit_now():
+        barrier.wait(timeout=10)
+        return client.put(f"/launcher/api/admin/templates/{t['id']}", json=body)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        published = executor.submit(publish_now)
+        edited = executor.submit(edit_now)
+        publication = published.result()
+        assert publication.status_code == 200
+        assert edited.result().status_code in {200, 409}
+    saved = next(tpl for tpl in client.get("/launcher/api/admin/templates").json() if tpl["id"] == t["id"])
+    assert saved["published"]
+    assert saved["description"] == publication.json()["description"]

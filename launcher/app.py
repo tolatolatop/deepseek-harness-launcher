@@ -9,7 +9,7 @@ from urllib.parse import quote
 import httpx
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response, UploadFile, WebSocket
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, StreamingResponse
-from sqlalchemy import delete
+from sqlalchemy import delete, update
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
@@ -312,6 +312,12 @@ def create_app() -> FastAPI:
 
     @api.post("/admin/templates/{template_id}/publish")
     def publish_template(template_id: str, user: User = Depends(admin), db: Session = Depends(get_db)):
+        # Also serialize writers on SQLite, where SELECT FOR UPDATE is ignored.
+        db.exec(
+            update(RuntimeTemplate)
+            .where(RuntimeTemplate.id == template_id)
+            .values(enabled=RuntimeTemplate.enabled)
+        )
         template = db.exec(
             select(RuntimeTemplate).where(RuntimeTemplate.id == template_id).with_for_update()
         ).first()
@@ -328,6 +334,11 @@ def create_app() -> FastAPI:
     def edit_template(
         template_id: str, body: TemplateCreate, user: User = Depends(admin), db: Session = Depends(get_db)
     ):
+        db.exec(
+            update(RuntimeTemplate)
+            .where(RuntimeTemplate.id == template_id)
+            .values(enabled=RuntimeTemplate.enabled)
+        )
         template = db.exec(
             select(RuntimeTemplate).where(RuntimeTemplate.id == template_id).with_for_update()
         ).first()
