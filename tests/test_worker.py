@@ -1,11 +1,13 @@
+import pytest
+import yaml
 from sqlmodel import Session, select
 
 from launcher.db import engine
-from launcher.models import Operation, Workspace
+from launcher.models import Operation, Platform, Workspace
 from launcher.runtime import RuntimeFailure, render_config, workspace_root
 from launcher.security import encrypt
 from launcher.worker import process_one, reconcile
-from tests.conftest import configured_workspace
+from tests.conftest import configured_workspace, login
 
 
 class FakeRuntime:
@@ -25,6 +27,56 @@ class FakeRuntime:
 
     def inspect(self, workspace_id):
         return "running" if workspace_id in self.running else "missing"
+
+
+@pytest.mark.parametrize("setup", ["none", "catalog_only"])
+def test_enter_without_model_credentials_then_configure(client, setup):
+    login(client)
+    if setup == "catalog_only":
+        client.put(
+            "/launcher/api/admin/platform",
+            json={"gateway_url": "http://gateway.example/v1", "models": ["team-model"]},
+        ).raise_for_status()
+    ws = client.post("/launcher/api/workspaces", json={}).json()
+    result = client.put(
+        f"/launcher/api/workspaces/{ws['id']}/config",
+        json={"instructions": "稍后配置模型🚀", "expected_version": ws["config_version"]},
+    )
+    assert result.status_code == 200, result.text
+    runtime = FakeRuntime()
+    endpoint = f"/launcher/api/workspaces/{ws['id']}"
+    patch_file = workspace_root(ws["id"]) / "managed" / "launcher.patch.yml"
+    for action in ("start", "restart", "rebuild"):
+        assert client.post(endpoint + "/actions/" + action).status_code == 202
+        assert process_one(runtime, "test")
+        current = client.get("/launcher/api/workspace").json()
+        assert current["status"] == "running" and not current["has_api_token"]
+        patch = {p["id"]: p for p in yaml.safe_load(patch_file.read_text())}
+        assert patch["llm-pi-ai"]["disabled"]
+        assert patch["agent-default-model"]["disabled"]
+        assert patch["session-title-llm"]["disabled"]
+    client.put(
+        "/launcher/api/admin/platform",
+        json={"gateway_url": "http://gateway.example/v1", "models": ["team-model"]},
+    ).raise_for_status()
+    current = client.get("/launcher/api/workspace").json()
+    result = client.put(
+        endpoint + "/config",
+        json={
+            "model": "team-model",
+            "api_token": "synthetic-test-token",
+            "expected_version": current["config_version"],
+        },
+    )
+    assert result.status_code == 200
+    assert client.post(endpoint + "/actions/restart").status_code == 202
+    assert process_one(runtime, "test")
+    patch = {p["id"]: p for p in yaml.safe_load(patch_file.read_text())}
+    assert not patch["llm-pi-ai"]["disabled"]
+    assert not patch["agent-default-model"]["disabled"]
+    assert not patch["session-title-llm"]["disabled"]
+    with Session(engine()) as db:
+        assert db.get(Platform, 1).models == ["team-model"]
 
 
 def test_start_stop_rebuild_preserve_files(client):

@@ -222,7 +222,7 @@ def create_app() -> FastAPI:
         db.refresh(ws)
         if ws.config_version != body.expected_version:
             raise HTTPException(409, "设置已更新，请刷新后重新保存")
-        if body.model not in db.get(Platform, 1).models:
+        if body.model and body.model not in db.get(Platform, 1).models:
             raise HTTPException(400, "请选择管理员提供的模型")
         if set(body.plugins) - EDITABLE_PLUGINS:
             raise HTTPException(400, "插件不在允许目录中")

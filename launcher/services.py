@@ -79,9 +79,6 @@ def enqueue(db: Session, actor: User, ws: Workspace, action: str) -> Operation:
         owner = db.get(User, ws.user_id)
         if not owner or not owner.active:
             raise HTTPException(409, "账号已停用")
-        platform = db.get(Platform, 1)
-        if not platform.gateway_url or ws.model not in platform.models or not ws.token_encrypted:
-            raise HTTPException(400, "请先配置 NEW API 地址、可用模型和个人模型令牌")
         count = db.exec(
             select(func.count())
             .select_from(Workspace)

@@ -95,27 +95,8 @@ def main():
             auth = http.post("/launcher/api/auth/login", json={"username": "admin", "password": password})
             auth.raise_for_status()
             http.headers["X-CSRF-Token"] = auth.json()["csrf_token"]
-            platform = http.put(
-                "/launcher/api/admin/platform",
-                json={
-                    "gateway_url": f"http://{prefix}-gateway:8000/v1",
-                    "models": ["smoke-model"],
-                },
-            )
-            platform.raise_for_status()
             ws = http.post("/launcher/api/workspaces", json={"name": "Docker smoke"}).json()
             wid = ws["id"]
-            result = http.put(
-                f"/launcher/api/workspaces/{wid}/config",
-                json={
-                    "model": "smoke-model",
-                    "api_token": "synthetic-smoke-token",
-                    "instructions": "Smoke test preferences",
-                    "plugins": [],
-                    "expected_version": ws["config_version"],
-                },
-            )
-            result.raise_for_status()
             http.post(
                 f"/launcher/api/workspaces/{wid}/files",
                 files={"file": ("persist.txt", b"persistent workspace content")},
@@ -144,6 +125,49 @@ def main():
                         return
                     time.sleep(1)
                 raise RuntimeError(f"{action} timed out")
+
+            def native_browser():
+                browser = subprocess.run(
+                    ["node", "scripts/runtime-browser.mjs"],
+                    cwd=ROOT,
+                    input=json.dumps(
+                        {
+                            "origin": f"http://localhost:{port}",
+                            "workspace": wid,
+                            "session": http.cookies.get("launcher_session"),
+                        }
+                    ),
+                    text=True,
+                    capture_output=True,
+                    timeout=40,
+                )
+                print(browser.stdout, end="", flush=True)
+                assert browser.returncode == 0, browser.stderr[-3000:]
+
+            operation("start")
+            native_browser()
+            print("PASS: enter real Harness without gateway, model or API token", flush=True)
+            operation("stop")
+            platform = http.put(
+                "/launcher/api/admin/platform",
+                json={
+                    "gateway_url": f"http://{prefix}-gateway:8000/v1",
+                    "models": ["smoke-model"],
+                },
+            )
+            platform.raise_for_status()
+            ws = http.get("/launcher/api/workspace").json()
+            result = http.put(
+                f"/launcher/api/workspaces/{wid}/config",
+                json={
+                    "model": "smoke-model",
+                    "api_token": "synthetic-smoke-token",
+                    "instructions": "Smoke test preferences",
+                    "plugins": [],
+                    "expected_version": ws["config_version"],
+                },
+            )
+            result.raise_for_status()
 
             operation("start")
             page = http.get(f"/launcher/w/{wid}/")
@@ -211,22 +235,7 @@ def main():
                 == b"created via model tool call\n"
             )
             print("PASS: streaming model response and native tool call (synthetic gateway)", flush=True)
-            browser = subprocess.run(
-                ["node", "scripts/runtime-browser.mjs"],
-                cwd=ROOT,
-                input=json.dumps(
-                    {
-                        "origin": f"http://localhost:{port}",
-                        "workspace": wid,
-                        "session": http.cookies.get("launcher_session"),
-                    }
-                ),
-                text=True,
-                capture_output=True,
-                timeout=40,
-            )
-            print(browser.stdout, end="", flush=True)
-            assert browser.returncode == 0, browser.stderr[-3000:]
+            native_browser()
             home = data / "workspaces" / wid / "home"
             sentinel = home / "persistence-smoke.txt"
             sentinel.write_text("persist home")

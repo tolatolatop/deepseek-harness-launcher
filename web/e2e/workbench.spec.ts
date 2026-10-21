@@ -37,6 +37,15 @@ test("admin setup and member workspace journey", async ({ page, browser }) => {
   await page.getByRole("button", { name: "登录", exact: true }).click();
   await page.getByRole("button", { name: "开通我的工作空间" }).click();
   await expect(
+    page.getByRole("button", { name: "启动工作空间" }),
+  ).toBeEnabled();
+  await expect(page).toHaveURL(/#workspace$/);
+  await expect(page.getByText(/模型连接尚未配置完整/)).toBeVisible();
+  await page
+    .getByRole("link", { name: "空间设置", exact: true })
+    .first()
+    .click();
+  await expect(
     page.getByRole("heading", { name: "空间设置", exact: true }),
   ).toBeVisible();
   await page.getByLabel("默认模型").selectOption("team-reasoning");

@@ -52,6 +52,8 @@ The member's session and workspace ownership are checked before access and durin
 
 The administrator supplies the inference base URL and model catalog. Members supply their own inference token; it is encrypted in the DB and injected only into their runtime. No management or enterprise upstream credentials are shared with runtimes. Runtime model calls go directly to NEW API. The connection check reads `/models` without invoking inference.
 
+Model credentials are optional for entering a workspace. Admission checks ownership and capacity without requiring a gateway, model or token. Until all three are configured, the managed model provider, default model and automatic session titles are disabled; users can save preferences and use the workspace UI. Saving model configuration and restarting enables those features. This does not supply free inference or a shared fallback credential.
+
 A NEW API management/identity adapter can be added independently later. Current local login does not imply single sign-on with the gateway.
 
 ## Configuration and plugins

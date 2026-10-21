@@ -78,6 +78,8 @@ GET  <base>/api/workspaces/<id>/operations
 
 Worker 负责租约、失败清理和状态对账。账号停用后先撤销平台访问，随后停止实例。容器意外退出会标记错误并释放名额，当前不自动反复重启失败实例。
 
+启动和进入空间不以网关、模型或个人令牌为前置条件。配置不完整时，平台注入的团队模型提供方、默认模型和自动会话命名禁用；补充配置并重启后启用。运行名额、账号状态和空间权限校验仍然执行。
+
 ## 3. 启动输入契约
 
 Worker 从平台配置组装以下输入，底座不需要理解 Launcher 的表结构：
@@ -91,7 +93,7 @@ Worker 从平台配置组装以下输入，底座不需要理解 Launcher 的表
 | `trusted_host` | 平台 URL 的 host:port | CLI `--trusted-host` |
 | `gateway_base_url` | 管理员配置，含 API 前缀，例如 `/v1` | Cordis patch 的 `baseURL` |
 | `models` / `default_model` | 平台目录 / 用户选择 | Cordis patch |
-| `model_token` | 解密当前成员令牌 | 容器环境变量，不写入 patch |
+| `model_token` | 解密当前成员令牌；未配置时为空 | 容器环境变量，不写入 patch，不阻止进入空间 |
 | `language` / `instructions` | 用户偏好 | 挂载的 `AGENTS.md` |
 | `plugins` | 平台允许目录的选择 | Cordis patch 的插件启用状态 |
 | `cpu` / `memory_mb` | 用户配额 | Docker CPU、内存限制 |
@@ -144,6 +146,7 @@ web
 
 ```yaml
 - id: llm-pi-ai
+  disabled: false
   config:
     providers:
       team-gateway:
@@ -154,6 +157,7 @@ web
         models:
           - id: team-model
 - id: agent-default-model
+  disabled: false
   config:
     provider: team-gateway
     model: team-model
@@ -164,6 +168,8 @@ web
 ```
 
 `managed/revision.json` 格式为 `{"version": 5}`。它是 Launcher 写出的版本记录；当前不是 Harness 回传的确认文件。`applied_version` 由 Worker 完成启动认证后记录。
+
+上面的 patch 示例适用于已配置完整模型连接的空间。网关、可选模型或令牌缺失时，前三项的 `disabled` 为 `true`；这仍是可启动、可进入的有效运行配置。
 
 保存设置只递增 `config_version`，不热修改运行中的容器。重启或重建时应用新版本；平台网关和模型目录变更也会使所有空间配置版本递增。旧实例在重启前继续使用旧地址和配置。
 

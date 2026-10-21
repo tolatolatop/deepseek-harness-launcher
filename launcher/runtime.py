@@ -53,9 +53,11 @@ def atomic_write(path: Path, content: str):
 
 def render_config(ws: Workspace, platform: Platform):
     root = prepare_storage(ws.id)
+    model_configured = bool(platform.gateway_url and ws.model in platform.models and ws.token_encrypted)
     patch = [
         {
             "id": "llm-pi-ai",
+            "disabled": not model_configured,
             "config": {
                 "providers": {
                     "team-gateway": {
@@ -68,8 +70,15 @@ def render_config(ws: Workspace, platform: Platform):
                 }
             },
         },
-        {"id": "agent-default-model", "config": {"provider": "team-gateway", "model": ws.model}},
-        {"id": "session-title-llm", "disabled": "session-titles" not in ws.plugins},
+        {
+            "id": "agent-default-model",
+            "disabled": not model_configured,
+            "config": {"provider": "team-gateway", "model": ws.model},
+        },
+        {
+            "id": "session-title-llm",
+            "disabled": not model_configured or "session-titles" not in ws.plugins,
+        },
         # The launcher catalog controls the deployed composition. Native plugin
         # installation is deliberately unavailable in this managed template.
         {"id": "ui-plugin-manager", "disabled": True},

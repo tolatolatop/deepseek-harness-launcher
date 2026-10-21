@@ -430,7 +430,7 @@ function App() {
                   </div>
                   <p className="workspace-description">
                     {!ws
-                      ? "开发工具、独立存储和 Agent 环境已准备好。开通空间，绑定你的模型令牌，就可以开始。"
+                      ? "开通并启动你的工作空间，模型连接可以稍后配置。"
                       : ws.status === "running"
                         ? "环境已就绪。打开 DeepSeek，处理资料、编写代码，或继续上次的任务。"
                         : "项目文件与会话保存在你的专属存储中，启动空间即可继续。"}
@@ -453,8 +453,9 @@ function App() {
                             });
                             setWs(created);
                             await refresh();
-                            location.hash = "settings";
-                            notify("空间已开通，请保存模型令牌后启动");
+                            notify(
+                              "空间已开通，可以直接启动，模型连接可稍后配置",
+                            );
                           })
                         }
                       >
@@ -540,6 +541,15 @@ function App() {
                   </span>
                 </div>
               </div>
+              {ws &&
+                (!ws.has_api_token ||
+                  !catalog?.gateway_configured ||
+                  !catalog.models.includes(ws.model)) && (
+                  <div className="notice notice-warning">
+                    模型连接尚未配置完整，你仍可启动并进入空间。使用团队模型前，请在
+                    <a href="#settings">空间设置</a>中补充配置并重启空间。
+                  </div>
+                )}
               {ws && ws.config_version !== ws.applied_version && (
                 <div className="pending-config">
                   <Settings2 size={17} />
@@ -1032,12 +1042,13 @@ function Settings({
               </span>
               <div>
                 <h3>模型连接</h3>
-                <p>使用团队的 NEW API 网关和你的专用调用令牌。</p>
+                <p>使用团队模型时配置；留空也可以启动和进入空间。</p>
               </div>
             </div>
             {!catalog?.gateway_configured && (
               <div className="notice notice-warning">
-                管理员尚未配置 NEW API 网关，请联系管理员。
+                管理员尚未配置 NEW API
+                网关。你可以先进入空间，稍后再配置模型连接。
               </div>
             )}
             <div className="form-grid">
@@ -1046,9 +1057,8 @@ function Settings({
                 <select
                   value={draft.model}
                   onChange={(e) => edit({ model: e.target.value })}
-                  required
                 >
-                  <option value="">选择可用模型</option>
+                  <option value="">稍后配置</option>
                   {catalog?.models.map((m) => (
                     <option key={m}>{m}</option>
                   ))}
