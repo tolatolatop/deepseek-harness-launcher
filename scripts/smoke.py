@@ -5,6 +5,7 @@ Runs an isolated API and worker. Removes only its own containers and temp files.
 The model gateway fixture validates wiring; it is not a real NEW API deployment.
 """
 
+import argparse
 import json
 import os
 import secrets
@@ -30,6 +31,13 @@ def free_port():
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Isolated real Docker/Harness integration test")
+    parser.add_argument(
+        "--desktop-only",
+        action="store_true",
+        help="Test native UI and browser desktop without the model fixture",
+    )
+    args = parser.parse_args()
     suffix = secrets.token_hex(4)
     prefix = f"launcher-smoke-{suffix}"
     port = free_port()
@@ -137,7 +145,7 @@ def main():
                     time.sleep(1)
                 raise RuntimeError(f"{action} timed out")
 
-            def native_browser():
+            def native_browser(desktop=False):
                 browser = subprocess.run(
                     ["node", "scripts/runtime-browser.mjs"],
                     cwd=ROOT,
@@ -146,6 +154,7 @@ def main():
                             "origin": f"http://localhost:{port}",
                             "workspace": wid,
                             "session": http.cookies.get("launcher_session"),
+                            "desktop": desktop,
                         }
                     ),
                     text=True,
@@ -155,10 +164,52 @@ def main():
                 print(browser.stdout, end="", flush=True)
                 assert browser.returncode == 0, browser.stderr[-3000:]
 
+            if not args.desktop_only:
+                operation("start")
+                native_browser()
+                print("PASS: enter real Harness without gateway, model or API token", flush=True)
+                operation("stop")
+            ws = http.get("/launcher/api/workspace").json()
+            http.put(
+                f"/launcher/api/workspaces/{wid}/config",
+                json={
+                    "expected_version": ws["config_version"],
+                    "plugins": ["browser-desktop", "browser-use"],
+                },
+            ).raise_for_status()
             operation("start")
-            native_browser()
-            print("PASS: enter real Harness without gateway, model or API token", flush=True)
+            desktop_ws = http.get("/launcher/api/workspace").json()
+            assert desktop_ws["desktop_url"]
+            assert http.get(desktop_ws["desktop_url"]).status_code == 200
+            assert (
+                httpx.get(f"http://localhost:{port}" + desktop_ws["desktop_url"], trust_env=False).status_code
+                == 401
+            )
+            desktop_container = client.containers.get(f"{prefix}-{wid}")
+            desktop_ports = desktop_container.attrs["NetworkSettings"]["Ports"]["6080/tcp"]
+            assert desktop_ports and all(p["HostIp"] == "127.0.0.1" for p in desktop_ports)
+            cdp_check = desktop_container.exec_run(
+                [
+                    "node",
+                    "-e",
+                    "fetch('http://127.0.0.1:9222/json/version').then(r=>r.json()).then(j=>{if(!j.webSocketDebuggerUrl)process.exit(1)}).catch(()=>process.exit(1))",
+                ]
+            )
+            assert cdp_check.exit_code == 0, "Chromium CDP endpoint is not ready"
+            native_browser(desktop=True)
+            interaction = desktop_container.exec_run(
+                [
+                    "node",
+                    "-e",
+                    "fetch('http://127.0.0.1:9222/json/list').then(r=>r.json()).then(t=>{if(!t.some(p=>p.url.startsWith('data:text/html,') && p.title === 'Launcher browser desktop'))process.exit(1)}).catch(()=>process.exit(1))",
+                ]
+            )
+            assert interaction.exit_code == 0, "VNC keyboard input did not reach Chromium"
+            print("PASS: real Chromium, embedded noVNC desktop and authenticated RFB WebSocket", flush=True)
             operation("stop")
+            assert http.get("/launcher/api/workspace").json()["desktop_url"] is None
+            if args.desktop_only:
+                return
             platform = http.put(
                 "/launcher/api/admin/platform",
                 json={

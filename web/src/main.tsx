@@ -25,6 +25,7 @@ import {
   LogOut,
   MemoryStick,
   MoreHorizontal,
+  Monitor,
   Play,
   Plus,
   RefreshCw,
@@ -109,6 +110,7 @@ type Workspace = {
   config_version: number;
   applied_version: number;
   entry_url: string;
+  desktop_url?: string | null;
   runtime?: WorkspaceRuntime;
 };
 type Catalog = {
@@ -532,6 +534,17 @@ function App() {
                         <Play size={17} />
                         启动工作空间
                       </button>
+                    )}
+                    {ws?.desktop_url && (
+                      <a
+                        className="button secondary"
+                        href={ws.desktop_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        <Monitor size={16} />
+                        浏览器桌面
+                      </a>
                     )}
                     {ws && ["running", "recovering"].includes(ws.status) && (
                       <button
@@ -1202,7 +1215,10 @@ function Settings({
               </span>
               <div>
                 <h3>预置插件</h3>
-                <p>团队模板提供的能力。可选插件变更后需要重启。</p>
+                <p>
+                  可选插件变更后需要重启。浏览器桌面会额外启动
+                  Chromium，登录状态随空间持久保存。
+                </p>
               </div>
             </div>
             <div className="plugin-list">
@@ -1218,13 +1234,19 @@ function Settings({
                         type="checkbox"
                         aria-label={plugin.name}
                         checked={draft.plugins.includes(plugin.id)}
-                        onChange={(e) =>
-                          edit({
-                            plugins: e.target.checked
-                              ? [...draft.plugins, plugin.id]
-                              : draft.plugins.filter((p) => p !== plugin.id),
-                          })
-                        }
+                        onChange={(e) => {
+                          const plugins = new Set(draft.plugins);
+                          if (e.target.checked) {
+                            plugins.add(plugin.id);
+                            if (plugin.id === "browser-use")
+                              plugins.add("browser-desktop");
+                          } else {
+                            plugins.delete(plugin.id);
+                            if (plugin.id === "browser-desktop")
+                              plugins.delete("browser-use");
+                          }
+                          edit({ plugins: [...plugins] });
+                        }}
                       />
                       <span />
                     </label>

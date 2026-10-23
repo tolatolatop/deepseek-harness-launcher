@@ -7,6 +7,7 @@ import uuid
 from sqlmodel import Session, select
 
 from launcher.db import engine
+from launcher.endpoints import save_runtime_endpoints
 from launcher.models import AuditEvent, Operation, Platform, User, WorkerHeartbeat, Workspace, now
 from launcher.runtime import DockerRuntime, RuntimeFailure, build_runtime_spec, render_config
 from launcher.services import enqueue
@@ -65,6 +66,7 @@ def process_one(runtime, worker_id: str) -> bool:
             db.refresh(binding)
             if state == "running":
                 ws.applied_version = version
+                save_runtime_endpoints(db, ws.id, handle)
                 binding.applied_snapshot = snapshot
                 binding.pinned_image_id = handle.image_id
                 binding.actual_image_id, binding.actual_image_ref = handle.image_id, handle.image_ref
@@ -73,6 +75,7 @@ def process_one(runtime, worker_id: str) -> bool:
                     now() + binding.max_runtime_minutes * 60 if binding.max_runtime_minutes else None
                 )
             else:
+                save_runtime_endpoints(db, ws.id)
                 binding.stop_at = None
                 binding.actual_image_id = binding.actual_image_ref = ""
             op.status = "succeeded"
@@ -98,6 +101,7 @@ def process_one(runtime, worker_id: str) -> bool:
         op.active_workspace_id = None
         op.lease_until = 0
         if ws.status == "error":
+            save_runtime_endpoints(db, ws.id)
             binding.stop_at = None
             binding.actual_image_id = binding.actual_image_ref = ""
         db.add(binding)
@@ -165,6 +169,7 @@ def reconcile(runtime):
                 ws.status, ws.error = "running", ""
                 ws.runtime_address, ws.runtime_cookie = handle.address, handle.encrypted_cookie
                 ws.applied_version = handle.config_version
+                save_runtime_endpoints(db, ws.id, handle)
                 binding.actual_image_id, binding.actual_image_ref = handle.image_id, handle.image_ref
                 binding.checked_at = now()
                 # Existing installations have no template labels; adopt their actual image.
@@ -172,6 +177,8 @@ def reconcile(runtime):
                     binding.applied_snapshot = {**binding.snapshot, "image": handle.image_ref}
                     if not binding.pinned_image_id and not handle.template_id:
                         binding.pinned_image_id = handle.image_id
+            if ws.status != "running":
+                save_runtime_endpoints(db, ws.id)
             db.add(ws)
             db.add(binding)
             db.commit()

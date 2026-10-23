@@ -9,6 +9,8 @@ from starlette.responses import Response, StreamingResponse
 from websockets.asyncio.client import connect
 
 from launcher.db import engine
+from launcher.endpoints import desktop_prefix
+from launcher.models import RuntimeEndpoint
 from launcher.security import authenticated, check_origin, decrypt
 from launcher.services import own_workspace
 from launcher.settings import settings
@@ -25,32 +27,37 @@ HOP_HEADERS = {
 }
 
 
-def target(token: str | None, workspace_id: str):
+def target(token: str | None, workspace_id: str, desktop: bool = False):
     with Session(engine()) as db:
         user = authenticated(db, token)
         ws = own_workspace(db, user, workspace_id)
         if ws.status != "running" or not ws.runtime_address or not ws.runtime_cookie:
             raise HTTPException(409, "工作空间未就绪，请返回工作台启动")
+        if desktop:
+            endpoint = db.get(RuntimeEndpoint, (workspace_id, "desktop"))
+            if not endpoint or endpoint.config_version != ws.applied_version:
+                raise HTTPException(409, "浏览器桌面尚未启动，请启用插件并重启空间")
+            return endpoint.address, ""
         return ws.runtime_address, decrypt(ws.runtime_cookie)
 
 
-def still_authorized(token: str | None, workspace_id: str, address: str) -> bool:
+def still_authorized(token: str | None, workspace_id: str, address: str, desktop: bool = False) -> bool:
     try:
-        return target(token, workspace_id)[0] == address
+        return target(token, workspace_id, desktop)[0] == address
     except HTTPException:
         return False
 
 
-async def proxy_http(request: Request, workspace_id: str, path: str):
+async def proxy_http(request: Request, workspace_id: str, path: str, desktop: bool = False):
     cfg = settings()
     check_origin(request)
     token = request.cookies.get("launcher_session")
-    address, cookie = target(token, workspace_id)
+    address, cookie = target(token, workspace_id, desktop)
     if "token" in request.query_params:
         raise HTTPException(400, "启动凭证由平台管理")
     if int(request.headers.get("content-length", "0") or 0) > cfg.upload_limit_mb * 1024**2:
         raise HTTPException(413, "请求过大")
-    prefix = f"{cfg.base_path}/w/{workspace_id}/"
+    prefix = desktop_prefix(workspace_id) if desktop else f"{cfg.base_path}/w/{workspace_id}/"
     # Never pass the launcher session or user-supplied credentials to the runtime.
     headers = {
         k: v
@@ -69,13 +76,17 @@ async def proxy_http(request: Request, workspace_id: str, path: str):
             "x-forwarded-proto",
         }
     }
-    headers.update({"Host": urlsplit(cfg.public_url).netloc, "Cookie": cookie, "Accept-Encoding": "identity"})
+    headers.update({"Host": urlsplit(cfg.public_url).netloc, "Accept-Encoding": "identity"})
+    if cookie:
+        headers["Cookie"] = cookie
     query = request.url.query
     url = f"{address}/{path}" + (f"?{query}" if query else "")
     client = httpx.AsyncClient(trust_env=False, timeout=httpx.Timeout(30, read=None), follow_redirects=False)
     try:
+        has_body = request.headers.get("content-length", "0") != "0" or "transfer-encoding" in request.headers
+        content = request.stream() if has_body or request.method not in {"GET", "HEAD"} else None
         upstream = await client.send(
-            client.build_request(request.method, url, headers=headers, content=request.stream()), stream=True
+            client.build_request(request.method, url, headers=headers, content=content), stream=True
         )
     except httpx.HTTPError:
         await client.aclose()
@@ -110,7 +121,7 @@ async def proxy_http(request: Request, workspace_id: str, path: str):
                 if pending is None:
                     pending = asyncio.create_task(anext(iterator))
                 done, _ = await asyncio.wait([pending], timeout=3)
-                if not still_authorized(token, workspace_id, address):
+                if not still_authorized(token, workspace_id, address, desktop):
                     break
                 if not done:
                     continue
@@ -134,14 +145,14 @@ async def proxy_http(request: Request, workspace_id: str, path: str):
     )
 
 
-async def proxy_ws(websocket: WebSocket, workspace_id: str, path: str):
+async def proxy_ws(websocket: WebSocket, workspace_id: str, path: str, desktop: bool = False):
     cfg = settings()
     token = websocket.cookies.get("launcher_session")
-    if websocket.headers.get("origin") != cfg.origin:
+    if websocket.headers.get("origin") != cfg.origin or (desktop and path != "websockify"):
         await websocket.close(code=1008)
         return
     try:
-        address, cookie = target(token, workspace_id)
+        address, cookie = target(token, workspace_id, desktop)
     except HTTPException:
         await websocket.close(code=1008)
         return
@@ -158,7 +169,7 @@ async def proxy_ws(websocket: WebSocket, workspace_id: str, path: str):
             port=endpoint.port,
             proxy=None,
             origin=cfg.origin,
-            additional_headers={"Cookie": cookie},
+            additional_headers={"Cookie": cookie} if cookie else {},
             subprotocols=protocols or None,
             max_size=16 * 1024**2,
         ) as upstream:
@@ -181,7 +192,7 @@ async def proxy_ws(websocket: WebSocket, workspace_id: str, path: str):
                         await websocket.send_text(message)
 
             async def monitor():
-                while still_authorized(token, workspace_id, address):
+                while still_authorized(token, workspace_id, address, desktop):
                     await asyncio.sleep(2)
 
             tasks = [asyncio.create_task(fn()) for fn in (to_runtime, to_browser, monitor)]

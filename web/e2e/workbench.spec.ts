@@ -53,11 +53,32 @@ test("admin setup and member workspace journey", async ({ page, browser }) => {
   await page
     .getByLabel("个人指令")
     .fill("请优先解释思路，生成文件后说明保存位置。");
+  await page
+    .getByRole("checkbox", { name: "Browser Use", exact: true })
+    .check();
+  await expect(
+    page.getByRole("checkbox", { name: "浏览器桌面", exact: true }),
+  ).toBeChecked();
+  await page
+    .getByRole("checkbox", { name: "浏览器桌面", exact: true })
+    .uncheck();
+  await expect(
+    page.getByRole("checkbox", { name: "Browser Use", exact: true }),
+  ).not.toBeChecked();
+  await page
+    .getByRole("checkbox", { name: "Browser Use", exact: true })
+    .check();
   await page.getByRole("button", { name: "保存设置" }).click();
   await expect(page.getByRole("status")).toContainText("设置已保存");
   await page.reload();
   await expect(page.getByLabel("默认模型")).toHaveValue("team-reasoning");
   await expect(page.getByLabel("模型调用令牌")).toHaveValue("");
+  await expect(
+    page.getByRole("checkbox", { name: "Browser Use", exact: true }),
+  ).toBeChecked();
+  await expect(
+    page.getByRole("checkbox", { name: "浏览器桌面", exact: true }),
+  ).toBeChecked();
   await page.getByRole("link", { name: "我的工作空间" }).click();
   await page.getByLabel("上传文件").setInputFiles({
     name: "任务资料.csv",

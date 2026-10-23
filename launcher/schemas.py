@@ -84,6 +84,8 @@ class TemplateSpec(BaseModel):
     cpu: float = Field(default=2, ge=0.5, le=16)
     memory_mb: int = Field(default=2048, ge=512, le=32768)
     tmp_mb: int = Field(default=512, ge=64, le=2048)
+    desktop_width: int = Field(default=1440, ge=800, le=3840)
+    desktop_height: int = Field(default=900, ge=600, le=2160)
     mount_policy: Literal["persistent-project-home"] = "persistent-project-home"
     environment: dict[str, str] = Field(default_factory=dict, max_length=20)
     startup_patches: list[str] = Field(default_factory=list, max_length=8)

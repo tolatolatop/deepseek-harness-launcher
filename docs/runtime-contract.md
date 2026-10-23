@@ -97,7 +97,8 @@ Worker 从平台配置组装以下输入，底座不需要理解 Launcher 的表
 | `models` / `default_model` | 平台目录 / 用户选择 | Cordis patch |
 | `model_token` | 解密当前成员令牌；未配置时为空 | 容器环境变量，不写入 patch，不阻止进入空间 |
 | `language` / `instructions` | 用户偏好 | 挂载的 `AGENTS.md` |
-| `plugins` | 平台允许目录的选择 | Cordis patch 的插件启用状态 |
+| `plugins` | 平台允许目录的选择 | Cordis patch 的插件启用状态；`browser-desktop` 启动桌面，`browser-use` 启用官方附加式 Playwright MCP，后者依赖前者 |
+| `desktop_width` / `desktop_height` | 模板快照，默认 1440 × 900 | `DSH_DESKTOP_WIDTH` / `DSH_DESKTOP_HEIGHT`，仅开启桌面时使用 |
 | `cpu` / `memory_mb` | 用户配额 | Docker CPU、内存限制 |
 | 存储路径 | `DATA_ROOT/workspaces/<id>` | bind mounts |
 
@@ -129,8 +130,8 @@ web
 | `HOME` | `/workspace` |
 | `DSH_HOME` | `/home/node/.dsh` |
 | `LAUNCHER_MODEL_TOKEN` | 当前成员的 NEW API 推理令牌 |
-| `DSH_DESKTOP_ENABLED` | `0` |
-| `DSH_BROWSER_USE_ENABLED` | `0` |
+| `DSH_DESKTOP_ENABLED` | 默认 `0`；启用 `browser-desktop` 时为 `1` |
+| `DSH_BROWSER_USE_ENABLED` | 默认 `0`；启用 `browser-use` 时为 `1` |
 | `DSH_TELEMETRY_DISABLED` | `1` |
 
 模型令牌在 Launcher 数据库中加密，在容器创建时解密注入。环境变量可由 Docker 管理员及容器内获授权进程读取，因此它不是针对容器自身的秘密隔离机制。原始令牌不出现在前端配置响应中。
@@ -235,6 +236,23 @@ WebSocket 使用同一空间鉴权，校验 Origin，转发文本/二进制消�
 因此 `Workspace.status=running` 只表示空间已完成启动，不能表示模型一定可用。模型请求连接超时、401、429 或上游 5xx 不应直接当成容器故障反复重建。
 
 当前相关超时：Docker 客户端 20 秒；启动就绪等待默认 120 秒；就绪 HTTP 单次 4 秒；停止优雅等待 15 秒；平台模型列表检查 15 秒；Web HTTP 代理连接等超时 30 秒、响应流读取无固定超时。实际模型请求的超时由 Harness 模型适配器和 NEW API 决定，当前 Launcher 不提供统一的模型请求超时配置。
+
+### 可选桌面端点
+
+原生 noVNC 在容器内监听 6080，上游不提供认证。Launcher 将它放在与空间相同的认证边界内，而不直接公开服务：
+
+```text
+GET/HEAD <base>/w/<id>/desktop/<asset-path>
+WS       <base>/w/<id>/desktop/websockify
+```
+
+HTTP 与 WebSocket 都校验 Launcher 会话、账号状态、空间归属、空间运行状态以及端点对应的已应用配置版本；长连接会定期复核并在授权失效后断开。桌面代理既不传入 Launcher Cookie，也不传入 Harness 原生 Cookie。浏览器直连入口使用公开路径，插件的 `desktopPort` 使用平台入口端口，`desktopPath` 包含完整空间前缀以及 noVNC WebSocket `path` 参数。
+
+固定社区插件 0.1.5 的客户端将状态轮询写为站点根路径 `/browser-desktop/state`，与空间子路径不兼容。Worker 从同一镜像的未启动、无网络临时容器读取 `client.js`，只适配轮询 URL 及桌面入口的初始值，再把生成文件只读挂载到原插件路径；不修改底座镜像或用户 Profile，也不提供不区分空间的根路径转发。无法识别的插件版本会明确启动失败，临时读取容器会清理。
+
+`RuntimeSpec` 增加 `desktop_enabled`、`browser_use_enabled` 和桌面宽高，全部有向后兼容的默认值。`RuntimeHandle.desktop_address` 是 Worker 返回的私有可选端点，不输出到浏览器；API 只输出可访问的 `desktop_url`。`RuntimeEndpoint` 表记录运行实例的实际地址和配置版本，启动和接管时写入，停止或故障时移除。接管从实际容器 label 和端口解析端点，不能将尚未重启应用的插件选择误当成已启动桌面。
+
+开启桌面时采用 1 GB `/dev/shm` 与 512 进程上限；资源总配额仍由原容器限制。Compose 通过实例私网访问 6080，本地模式仅映射回环随机端口。9222/CDP 不映射、不提供通用端口转发。插件安装、浏览器工具调用和 Agent 行为仍由 Harness 负责。
 
 ## 7. 版本兼容与验收
 

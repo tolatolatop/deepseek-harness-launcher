@@ -18,6 +18,8 @@ export type EnvironmentTemplate = {
     cpu: number;
     memory_mb: number;
     tmp_mb: number;
+    desktop_width?: number;
+    desktop_height?: number;
     mount_policy: string;
     environment: Record<string, string>;
     startup_patches: string[];
@@ -240,6 +242,8 @@ export function TemplateManager({
                     cpu: Number(data.get("cpu")),
                     memory_mb: Number(data.get("memory_mb")),
                     tmp_mb: Number(data.get("tmp_mb")),
+                    desktop_width: Number(data.get("desktop_width")),
+                    desktop_height: Number(data.get("desktop_height")),
                     environment,
                     startup_patches: String(data.get("startup_patches") || "")
                       .split("\n")
@@ -465,6 +469,31 @@ export function TemplateManager({
                   placeholder="每行一个 /opt 下的 YAML 文件路径"
                 />
               </label>
+              <label>
+                浏览器桌面宽度（像素）
+                <input
+                  name="desktop_width"
+                  type="number"
+                  min={800}
+                  max={3840}
+                  required
+                  defaultValue={draft?.spec.desktop_width ?? 1440}
+                />
+              </label>
+              <label>
+                浏览器桌面高度（像素）
+                <input
+                  name="desktop_height"
+                  type="number"
+                  min={600}
+                  max={2160}
+                  required
+                  defaultValue={draft?.spec.desktop_height ?? 900}
+                />
+              </label>
+              <p className="template-field-help template-field-wide">
+                分辨率仅在成员启用“浏览器桌面”插件后使用，默认关闭。桌面访问沿用空间登录入口。
+              </p>
             </div>
           </details>
           <footer className="template-editor-footer">

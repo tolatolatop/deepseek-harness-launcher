@@ -65,6 +65,10 @@ The pinned adapter appends a read-only Cordis overlay after the image's default 
 
 The managed template disables the native plugin-manager UI. This is a supported-product boundary, not a guarantee that an agent with command execution cannot alter its own writable environment. Plugin capability labels are descriptive, not an OS permission system.
 
+Optional browser desktop startup is driven by the `browser-desktop` plugin selection; `browser-use` also enables the official Playwright MCP attachment to the same persistent Chromium. Both default off. Template snapshots supply desktop dimensions. `endpoints.py` and the additive `RuntimeEndpoint` table track the actual per-container noVNC address and applied config version; pending plugin changes do not change a running endpoint. Recovery reconstructs this endpoint from actual container labels and port bindings.
+
+The browser desktop plugin uses the public Launcher port and a workspace-scoped noVNC path. Its assets and binary WebSocket stream pass through the same owner/session checks as Harness, without forwarding either Launcher or Harness cookies to noVNC. Disabling an account revokes both access paths. CDP remains private to the container.
+
 ## Networking
 
 Each space gets a separate `/28` bridge subnet selected from a configurable pool. Only that runtime and the control proxy/worker join it. The runtime never receives the Docker Socket or database network. Local development publishes its native port to localhost for Docker Desktop compatibility; deployment uses container-to-container traffic.

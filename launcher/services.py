@@ -2,7 +2,8 @@ from fastapi import HTTPException
 from sqlalchemy import func, update
 from sqlmodel import Session, select
 
-from launcher.models import AuditEvent, Operation, Platform, User, Workspace, now
+from launcher.endpoints import desktop_url
+from launcher.models import AuditEvent, Operation, Platform, RuntimeEndpoint, User, Workspace, now
 from launcher.settings import settings
 
 PLUGIN_CATALOG = [
@@ -23,6 +24,18 @@ PLUGIN_CATALOG = [
         "name": "个人指令",
         "description": "将回复语言和个人偏好带入工作会话。",
         "editable": False,
+    },
+    {
+        "id": "browser-desktop",
+        "name": "浏览器桌面",
+        "description": "启动容器内的 Chromium 与 noVNC，在 Harness 中查看并接管浏览器。",
+        "editable": True,
+    },
+    {
+        "id": "browser-use",
+        "name": "Browser Use",
+        "description": "让 Harness 的官方 Playwright MCP 操作同一浏览器，需要同时启用浏览器桌面。",
+        "editable": True,
     },
     {
         "id": "session-titles",
@@ -56,6 +69,12 @@ def public_workspace(ws: Workspace, db: Session):
     result = ws.model_dump(exclude={"token_encrypted", "runtime_cookie", "runtime_address"})
     result["has_api_token"] = bool(ws.token_encrypted)
     result["entry_url"] = f"{settings().base_path}/w/{ws.id}/"
+    endpoint = db.get(RuntimeEndpoint, (ws.id, "desktop"))
+    result["desktop_url"] = (
+        desktop_url(ws.id)
+        if ws.status == "running" and endpoint and endpoint.config_version == ws.applied_version
+        else None
+    )
     from launcher.templates import runtime_summary
 
     result["runtime"] = runtime_summary(db, ws)

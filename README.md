@@ -14,7 +14,7 @@ Python / FastAPI + React 的企业团队 Harness 启动器。成员通过一个�
 - 单入口路径代理，支持 HTTP、流式响应和 WebSocket；Harness 启动凭证不下发浏览器。
 - 项目和 `DSH_HOME` 独立持久化，文件列表、上传、下载与存储用量统计。
 - 对接现有 NEW API，管理员配置模型目录，成员绑定独立模型调用令牌；凭证加密存储。
-- 默认模型、回复语言、个人指令、可选会话自动命名插件；显示待应用配置版本。
+- 默认模型、回复语言、个人指令、可选会话自动命名、浏览器桌面和 Browser Use 插件；显示待应用配置版本。
 - 管理成员资源配额、全部实例状态、停止实例和审计记录。
 - 运行模板草稿、发布与停用；空间创建时选择版本，保存独立快照，展示实际镜像。
 - 显式切换兼容模板、管理员提交升级、批量启停/重启，以及可选的到期停止。
@@ -74,6 +74,23 @@ uv run python -m launcher.worker
 NEW API 地址必须能从运行容器中访问，容器内的 `localhost` 指容器自身。生产网关的用户授权、额度和可用模型仍由 NEW API 实施。Launcher 的模型列表是默认配置与界面选择约束，不是不可绕过的网络策略。
 
 当前自动化管理 NEW API 用户／令牌、用量同步和 SSO 未实现；使用 Launcher 本地身份及用户已有模型令牌，避免假定你们的 NEW API 管理接口版本。
+
+## 浏览器桌面与 Browser Use（可选）
+
+当前固定底座镜像已内置 Chromium、Xvfb、x11vnc、noVNC 和 `@runzhliu/dsh-browser-desktop`，无需另装桌面镜像。
+
+1. 在「空间设置 → 预置插件」启用「浏览器桌面」，保存并启动或重启空间。
+2. 「进入 DeepSeek」后，从 Harness 的浏览器桌面按钮打开内嵌桌面；工作台也提供「浏览器桌面」入口，单独打开同一桌面。
+3. 需要 Agent 操作浏览器时，再启用「Browser Use」。它自动联动启用桌面，使用官方 Playwright MCP 挂接同一个 Chromium，人工接管与 Agent 共享标签页和登录状态。模型调用仍由自己的网关和令牌负责。
+4. 关闭「浏览器桌面」会同时关闭 Browser Use；保存后重启，释放浏览器进程。
+
+两项默认关闭，不要求先配置模型才能查看桌面。管理员可以在模板高级选项设置桌面分辨率，默认 1440 × 900。浏览器 Profile 保存在个人空间的 Harness home 中，停止与重建后保留。
+
+容器内 noVNC 使用 **6080**，访问路径为 `<base>/w/<id>/desktop/vnc.html`，HTTP 资源和 `/desktop/websockify` WebSocket 都经过 Launcher 的会话、空间归属和账号状态校验。Compose 不发布 6080；本地开发仅使用回环随机端口，由 Launcher 代理访问。无需独立域名、额外端口或 VNC 密码；Chromium CDP 9222 保持在容器内。
+
+启用桌面时，容器共享内存设为 1 GB、进程上限设为 512，CPU 和总内存仍受成员配额与模板限制；建议至少分配 2 GB 内存。浏览器 Profile 包含登录状态，按个人空间数据管理。
+
+![Harness 内嵌 Chromium 桌面实测](docs/screenshots/browser-desktop.png)
 
 ## Docker Compose 部署
 
@@ -157,6 +174,13 @@ LAUNCHER_DATABASE_URL=mysql+pymysql://launcher:URL_ENCODED_PASSWORD@mysql-host:3
 新增的 `runtimetemplate`、`workspaceruntime` 表在 API 初始化时创建，并幂等补齐旧空间记录。既有账号和空间表不修改；旧运行容器由 Worker 自动接管并记录实际镜像。恢复期间显示「正在恢复连接」，不用人工重新挂接空间网络。
 
 ## 测试
+
+仅验证真实浏览器桌面（使用临时空间，不调用模型）：
+
+```bash
+uv run python scripts/smoke.py --desktop-only
+```
+
 
 后端测试覆盖登录、权限、配置、文件、代理、生命周期及并发资源分配；同一套测试可在 SQLite、PostgreSQL 和 MySQL 上执行。首版还验证了管理员到成员的浏览器操作流程、真实 Harness 容器与原生浏览器界面，以及 Docker Compose + PostgreSQL 下的启动、停止和文件持久化。
 

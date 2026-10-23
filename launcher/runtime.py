@@ -1,11 +1,13 @@
 """Pinned adapter for runzhliu/deepseek-harness-docker 0.2.1-rc.2-r1."""
 
 import hashlib
+import io
 import ipaddress
 import json
 import os
 import re
 import shutil
+import tarfile
 import time
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -16,6 +18,7 @@ import yaml
 from docker.errors import NotFound
 from sqlmodel import Session
 
+from launcher.endpoints import desktop_url
 from launcher.models import Platform, User, Workspace
 from launcher.runtime_types import RuntimeHandle, RuntimeSpec
 from launcher.schemas import TemplateSpec
@@ -86,6 +89,17 @@ def render_config(ws: Workspace, platform: Platform):
         # The launcher catalog controls the deployed composition. Native plugin
         # installation is deliberately unavailable in this managed template.
         {"id": "ui-plugin-manager", "disabled": True},
+        {
+            "id": "browser-desktop",
+            "disabled": "browser-desktop" not in ws.plugins,
+            "config": {
+                "desktopPort": urlsplit(settings().public_url).port
+                or (443 if urlsplit(settings().public_url).scheme == "https" else 80),
+                "desktopPath": desktop_url(ws.id),
+            },
+        },
+        {"id": "browser-use", "disabled": "browser-use" not in ws.plugins},
+        {"id": "browser-use-playwright-mcp", "disabled": "browser-use" not in ws.plugins},
     ]
     atomic_write(root / "managed" / "launcher.patch.yml", yaml.safe_dump(patch, allow_unicode=True))
     atomic_write(
@@ -115,6 +129,10 @@ def build_runtime_spec(db: Session, ws: Workspace, user: User) -> RuntimeSpec:
         tmp_mb=template.tmp_mb,
         startup_patches=tuple(template.startup_patches),
         environment={**template.environment, "LAUNCHER_MODEL_TOKEN": decrypt(ws.token_encrypted)},
+        desktop_enabled="browser-desktop" in ws.plugins,
+        browser_use_enabled="browser-use" in ws.plugins and "browser-desktop" in ws.plugins,
+        desktop_width=template.desktop_width,
+        desktop_height=template.desktop_height,
     )
 
 
@@ -200,6 +218,52 @@ class DockerRuntime:
         container = self.container(workspace_id)
         return container.status if container else "missing"
 
+    def prepare_browser_client(self, spec: RuntimeSpec, image_id: str) -> Path:
+        """Adapt the pinned community plugin's root-only URL to this workspace mount.
+
+        Read the shipped asset from a never-started, networkless container. The
+        patched file is mounted read-only; the image and user's profile stay intact.
+        """
+        reader = self.client.containers.create(
+            image_id,
+            entrypoint=["true"],
+            network_mode="none",
+            labels={
+                "launcher.managed": self.cfg.docker_prefix,
+                "launcher.workspace": spec.workspace_id,
+                "launcher.asset-reader": "1",
+            },
+        )
+        try:
+            chunks, _ = reader.get_archive("/opt/deepseek-harness/plugins/dsh-browser-desktop/client.js")
+            with tarfile.open(fileobj=io.BytesIO(b"".join(chunks))) as archive:
+                member = next(m for m in archive.getmembers() if m.name == "client.js" and m.isfile())
+                if member.size > 256 * 1024:
+                    raise ValueError("unexpected browser asset size")
+                source = archive.extractfile(member).read().decode()
+            needle = "fetch('/browser-desktop/state',"
+            if source.count(needle) != 1:
+                raise ValueError("unsupported browser desktop client")
+            source = source.replace(needle, "fetch(new URL('browser-desktop/state', window.location.href),")
+            # Safe initial values also cover a click before the first state poll.
+            source = source.replace(
+                "desktopPort: 6080,",
+                f"desktopPort: {urlsplit(spec.public_url).port or (443 if urlsplit(spec.public_url).scheme == 'https' else 80)},",
+                1,
+            )
+            source = source.replace(
+                "desktopPath: '/vnc.html?autoconnect=1&resize=scale&view_only=0&reconnect=1',",
+                f"desktopPath: {json.dumps(desktop_url(spec.workspace_id))},",
+                1,
+            )
+            path = spec.root / "managed" / "browser-desktop-client.js"
+            atomic_write(path, source)
+            return path
+        except Exception:
+            raise RuntimeFailure("镜像内浏览器桌面插件不兼容，请管理员检查固定底座版本") from None
+        finally:
+            reader.remove(force=True)
+
     def start(self, spec: RuntimeSpec, rebuild: bool = False) -> RuntimeHandle:
         cfg = self.cfg
         cfg.data_root.mkdir(parents=True, exist_ok=True)
@@ -220,6 +284,7 @@ class DockerRuntime:
                 image = self.client.images.get(spec.image)
             except NotFound:
                 raise RuntimeFailure("模板镜像尚未准备，请管理员先拉取模板指定的镜像") from None
+            browser_client = self.prepare_browser_client(spec, image.id) if spec.desktop_enabled else None
             container = self.client.containers.create(
                 image.id,
                 name=self.name(spec.workspace_id),
@@ -241,12 +306,24 @@ class DockerRuntime:
                 environment={
                     "HOME": "/workspace",
                     "DSH_HOME": "/home/node/.dsh",
-                    "DSH_DESKTOP_ENABLED": "0",
-                    "DSH_BROWSER_USE_ENABLED": "0",
+                    "DSH_DESKTOP_ENABLED": "1" if spec.desktop_enabled else "0",
+                    "DSH_BROWSER_USE_ENABLED": "1" if spec.browser_use_enabled else "0",
+                    "DSH_DESKTOP_WIDTH": str(spec.desktop_width),
+                    "DSH_DESKTOP_HEIGHT": str(spec.desktop_height),
                     "DSH_TELEMETRY_DISABLED": "1",
                     **spec.environment,
                 },
                 volumes={
+                    **(
+                        {
+                            str(browser_client): {
+                                "bind": "/opt/deepseek-harness/plugins/dsh-browser-desktop/client.js",
+                                "mode": "ro",
+                            }
+                        }
+                        if browser_client
+                        else {}
+                    ),
                     str(root / "project"): {"bind": "/workspace", "mode": "rw"},
                     str(root / "home"): {"bind": "/home/node/.dsh", "mode": "rw"},
                     str(root / "managed"): {"bind": "/run/launcher", "mode": "ro"},
@@ -254,14 +331,22 @@ class DockerRuntime:
                 },
                 network=network.name,
                 read_only=True,
-                ports={"3080/tcp": ("127.0.0.1", None)} if not cfg.control_containers else None,
+                ports=(
+                    {
+                        "3080/tcp": ("127.0.0.1", None),
+                        **({"6080/tcp": ("127.0.0.1", None)} if spec.desktop_enabled else {}),
+                    }
+                    if not cfg.control_containers
+                    else None
+                ),
+                shm_size="1g" if spec.desktop_enabled else "64m",
                 tmpfs={"/tmp": f"rw,noexec,nosuid,nodev,size={spec.tmp_mb * 1024**2}"},
                 cap_drop=["ALL"],
                 security_opt=["no-new-privileges:true"],
                 mem_limit=f"{spec.memory_mb}m",
                 memswap_limit=f"{spec.memory_mb}m",
                 nano_cpus=int(spec.cpu * 1e9),
-                pids_limit=256,
+                pids_limit=512 if spec.desktop_enabled else 256,
                 labels={
                     "launcher.managed": cfg.docker_prefix,
                     "launcher.workspace": spec.workspace_id,
@@ -269,6 +354,7 @@ class DockerRuntime:
                     "launcher.template": spec.template_id,
                     "launcher.template-version": spec.template_version,
                     "launcher.image-ref": spec.image_ref,
+                    "launcher.browser-desktop": "1" if spec.desktop_enabled else "0",
                 },
                 log_config=docker.types.LogConfig(
                     type="json-file", config={"max-size": "10m", "max-file": "2"}
@@ -307,6 +393,23 @@ class DockerRuntime:
                     binding = container.attrs["NetworkSettings"]["Ports"]["3080/tcp"][0]
                     address = f"http://127.0.0.1:{binding['HostPort']}"
 
+                desktop_address = ""
+                if container.labels.get("launcher.browser-desktop") == "1":
+                    if cfg.control_containers:
+                        desktop_address = f"http://{urlsplit(address).hostname}:6080"
+                    else:
+                        desktop_binding = container.attrs["NetworkSettings"]["Ports"].get("6080/tcp")
+                        if not desktop_binding:
+                            raise RuntimeFailure("浏览器桌面端口未准备，请重启工作空间")
+                        desktop_address = f"http://127.0.0.1:{desktop_binding[0]['HostPort']}"
+                    try:
+                        desktop_ready = http.get(f"{desktop_address}/vnc.html").status_code == 200
+                    except httpx.HTTPError:
+                        desktop_ready = False
+                    if not desktop_ready:
+                        time.sleep(0.2)
+                        continue
+
                 def handle(cookie):
                     return RuntimeHandle(
                         address=address,
@@ -318,6 +421,7 @@ class DockerRuntime:
                         config_version=int(container.labels.get("launcher.config-version", "0")),
                         template_id=container.labels.get("launcher.template", ""),
                         template_version=container.labels.get("launcher.template-version", ""),
+                        desktop_address=desktop_address,
                     )
 
                 if existing_cookie:
@@ -352,6 +456,9 @@ class DockerRuntime:
         for container in self.client.containers.list(
             all=True, filters={"label": f"launcher.managed={self.cfg.docker_prefix}"}
         ):
+            if container.labels.get("launcher.asset-reader") == "1":
+                container.remove(force=True)
+                continue
             workspace_id = container.labels.get("launcher.workspace", "")
             if re.fullmatch(r"[a-f0-9]{32}", workspace_id) and workspace_id not in workspace_ids:
                 self.stop(workspace_id)

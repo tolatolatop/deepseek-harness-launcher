@@ -132,3 +132,10 @@ class WorkspaceRuntime(TableModel, table=True):
     checked_at: float = Field(default=0, sa_type=Double)
     max_runtime_minutes: int | None = None
     stop_at: float | None = Field(default=None, sa_type=Double)
+
+
+class RuntimeEndpoint(TableModel, table=True):
+    workspace_id: str = Field(primary_key=True, foreign_key="workspace.id", max_length=32)
+    name: str = Field(default="desktop", primary_key=True, max_length=32)
+    address: str = Field(sa_type=Text, repr=False)
+    config_version: int

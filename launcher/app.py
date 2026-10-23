@@ -414,6 +414,8 @@ def create_app() -> FastAPI:
         if set(body.plugins) - EDITABLE_PLUGINS:
             raise HTTPException(400, "插件不在允许目录中")
         ws.model, ws.language, ws.instructions = body.model, body.language, body.instructions
+        if "browser-use" in body.plugins and "browser-desktop" not in body.plugins:
+            raise HTTPException(422, "Browser Use 需要同时启用浏览器桌面")
         ws.plugins = sorted(set(body.plugins))
         if body.api_token is not None:
             ws.token_encrypted = encrypt(body.api_token.strip())
@@ -607,6 +609,17 @@ def create_app() -> FastAPI:
     def runtime_mount(request: Request, workspace_id: str, db: Session = Depends(get_db)):
         own_workspace(db, current_user(request, db), workspace_id)
         return RedirectResponse(f"{cfg.base_path}/w/{workspace_id}/", status_code=308)
+
+    @app.api_route(
+        f"{cfg.base_path}/w/{{workspace_id}}/desktop/{{path:path}}",
+        methods=["GET", "HEAD"],
+    )
+    async def desktop_http(request: Request, workspace_id: str, path: str):
+        return await proxy_http(request, workspace_id, path, desktop=True)
+
+    @app.websocket(f"{cfg.base_path}/w/{{workspace_id}}/desktop/{{path:path}}")
+    async def desktop_ws(websocket: WebSocket, workspace_id: str, path: str):
+        await proxy_ws(websocket, workspace_id, path, desktop=True)
 
     @app.api_route(
         f"{cfg.base_path}/w/{{workspace_id}}/{{path:path}}",

@@ -32,6 +32,7 @@ class FakeRuntime:
             actual.config_version,
             actual.template_id,
             actual.template_version,
+            desktop_address="http://127.0.0.1:6080" if actual.desktop_enabled else "",
         )
 
     def cleanup_orphans(self, workspace_ids):

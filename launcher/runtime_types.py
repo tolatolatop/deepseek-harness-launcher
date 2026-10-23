@@ -17,6 +17,10 @@ class RuntimeSpec:
     tmp_mb: int
     startup_patches: tuple[str, ...]
     environment: dict[str, str] = field(repr=False)
+    desktop_enabled: bool = False
+    browser_use_enabled: bool = False
+    desktop_width: int = 1440
+    desktop_height: int = 900
 
 
 @dataclass(frozen=True)
@@ -28,3 +32,4 @@ class RuntimeHandle:
     config_version: int
     template_id: str
     template_version: str
+    desktop_address: str = field(default="", repr=False)
